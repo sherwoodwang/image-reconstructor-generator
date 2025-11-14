@@ -9,21 +9,43 @@ rebuild an image file from the extracted files.
 import argparse
 import sys
 from pathlib import Path
+import mmh3
 
 
 class ImageProcessor:
     """Processes files and generates shell script to rebuild an image."""
 
-    def __init__(self, image_file: Path, output_stream=sys.stdout):
+    def __init__(self, image_file: Path, output_stream=sys.stdout, block_size: int = 4096):
         """
         Initialize the image processor.
 
         Args:
             image_file: Path to the original image file
             output_stream: Stream to write the shell script to
+            block_size: Size of blocks in bytes for hashing (default: 4096)
         """
         self.image_file = image_file
+        self.block_size = block_size
         self.output_stream = output_stream
+        self.image_hashes = self._generate_image_hashes()
+
+    def _generate_image_hashes(self):
+        """
+        Generate an in-memory array of murmur hashes for each block in the image.
+
+        Returns:
+            List of hash values for each block in the image
+        """
+        hashes = []
+        with open(self.image_file, 'rb') as f:
+            while True:
+                block = f.read(self.block_size)
+                if not block:
+                    break
+                # Use MurmurHash3 to hash the block
+                hash_value = mmh3.hash(block, signed=False)
+                hashes.append(hash_value)
+        return hashes
 
     def begin(self):
         """Start processing - write shell script header."""
@@ -132,6 +154,14 @@ Examples:
         help='Allow writing binary data to terminal (use with caution)'
     )
 
+    parser.add_argument(
+        '-b', '--block-size',
+        type=int,
+        default=4096,
+        metavar='BYTES',
+        help='Block size in bytes for hashing (default: 4096, which is 4KB)'
+    )
+
     args = parser.parse_args()
 
     # Verify the image file exists
@@ -153,7 +183,7 @@ Examples:
         )
 
     # Initialize the processor
-    processor = ImageProcessor(args.image, args.output)
+    processor = ImageProcessor(args.image, args.output, block_size=args.block_size)
 
     try:
         # Begin processing
