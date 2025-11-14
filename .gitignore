@@ -1,0 +1,16 @@
+# Virtual environment
+venv/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# IDE - keep settings.json tracked
+.vscode/*
+!.vscode/settings.json
