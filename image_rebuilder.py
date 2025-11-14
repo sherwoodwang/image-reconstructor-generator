@@ -67,72 +67,134 @@ class ImageProcessor:
         # TODO: Implement shell script header generation
         pass
 
-    def _verify_extent_match(self, file_path, image_offset, extent_size):
+    def _find_extent_in_image(self, file_f, image_f, file_size, image_size,
+                              file_hashes, extent_blocks, file_start_block=0):
         """
-        Verify that data in the file matches the image byte-by-byte.
+        Find the first occurrence of an extent (sequence of hashes) in the image
+        and extend it as far as possible using byte-by-byte comparison.
 
         Args:
-            file_path: Path to the file being compared
-            image_offset: Byte offset in the image file
-            extent_size: Number of bytes to compare
-
-        Returns:
-            True if data matches byte-by-byte, False otherwise
-        """
-        with open(file_path, 'rb') as file_f, open(self.image_file, 'rb') as image_f:
-            # Seek to the position in the image
-            image_f.seek(image_offset)
-
-            # Compare in chunks for efficiency
-            chunk_size = 65536  # 64KB chunks
-            bytes_compared = 0
-
-            while bytes_compared < extent_size:
-                bytes_to_read = min(chunk_size, extent_size - bytes_compared)
-
-                file_chunk = file_f.read(bytes_to_read)
-                image_chunk = image_f.read(bytes_to_read)
-
-                if file_chunk != image_chunk:
-                    return False
-
-                bytes_compared += bytes_to_read
-
-            return True
-
-    def _find_extent_in_image(self, file_path, file_hashes, extent_blocks):
-        """
-        Find the first occurrence of an extent (sequence of hashes) in the image.
-
-        Args:
-            file_path: Path to the file being searched
+            file_f: Open file handle for the file being searched
+            image_f: Open file handle for the image file
+            file_size: Size of the file in bytes
+            image_size: Size of the image in bytes
             file_hashes: List of hash values from the file
             extent_blocks: Number of blocks in the extent to search for
+            file_start_block: Block offset in the file to start searching from (default: 0)
 
         Returns:
-            Index in image_hashes where the extent was found, or None if not found
+            Tuple of (file_start_block, file_end_block, image_start_block, image_end_block) where:
+            - file_start_block: Starting block in the file that matched
+            - file_end_block: Ending block in the file (exclusive)
+            - image_start_block: Starting block in the image where match was found
+            - image_end_block: Ending block in the image (exclusive)
+            Returns None if not found.
         """
-        if extent_blocks > len(file_hashes):
+        if file_start_block + extent_blocks > len(file_hashes):
             return None
 
-        # Extract the extent (first extent_blocks hashes) from the file
-        extent = file_hashes[:extent_blocks]
+        # Extract the extent starting from file_start_block
+        extent = file_hashes[file_start_block:file_start_block + extent_blocks]
 
         # Search for this extent in the image hashes
         # We need to find a contiguous sequence of hashes that matches
         for i in range(len(self.image_hashes) - extent_blocks + 1):
             # Check if all hashes in the extent match at this position
             if self.image_hashes[i:i + extent_blocks] == extent:
-                # Hash match found - verify byte-by-byte to confirm
-                image_offset = i * self.block_size
-                extent_size = extent_blocks * self.block_size
+                # Hash match found - verify and extend by byte-by-byte comparison
+                result = self._extend_match_forward_at_offset(
+                    file_f, image_f, file_size, image_size,
+                    file_start_block, i, extent_blocks
+                )
 
-                if self._verify_extent_match(file_path, image_offset, extent_size):
-                    # Confirmed match
-                    return i
-                # Hash collision - continue searching
+                if result is not None:
+                    # Match confirmed and extends at least the minimum extent size
+                    file_end_block, image_end_block = result
+                    return (file_start_block, file_end_block, i, image_end_block)
+                # Hash collision or match too short - continue searching
 
         return None
+
+    def _extend_match_forward_at_offset(self, file_f, image_f, file_size, image_size,
+                                        file_start_block, image_start_block, min_extent_blocks):
+        """
+        Verify and extend a matched region as far as possible by byte-by-byte comparison.
+
+        Args:
+            file_f: Open file handle for the file being compared
+            image_f: Open file handle for the image file
+            file_size: Size of the file in bytes
+            image_size: Size of the image in bytes
+            file_start_block: Starting block in the file
+            image_start_block: Starting block in the image
+            min_extent_blocks: Minimum number of blocks required for a valid extent
+
+        Returns:
+            Tuple of (file_end_block, image_end_block) if match extends at least min_extent_blocks,
+            None otherwise
+        """
+        # Calculate byte offsets from the start of the match
+        file_offset = file_start_block * self.block_size
+        image_offset = image_start_block * self.block_size
+
+        # Maximum bytes we can compare
+        max_file_bytes = file_size - file_offset
+        max_image_bytes = image_size - image_offset
+
+        if max_file_bytes <= 0 or max_image_bytes <= 0:
+            # Nothing to compare
+            return None
+
+        # Seek to the starting positions
+        file_f.seek(file_offset)
+        image_f.seek(image_offset)
+
+        chunk_size = 65536  # 64KB chunks for efficiency
+        bytes_matched = 0
+        max_bytes = min(max_file_bytes, max_image_bytes)
+
+        while bytes_matched < max_bytes:
+            bytes_to_read = min(chunk_size, max_bytes - bytes_matched)
+
+            file_chunk = file_f.read(bytes_to_read)
+            image_chunk = image_f.read(bytes_to_read)
+
+            # Find how many bytes match in this chunk
+            for j in range(len(file_chunk)):
+                if j >= len(image_chunk) or file_chunk[j] != image_chunk[j]:
+                    # Mismatch found
+                    bytes_matched += j
+                    # Calculate total matched bytes from the start
+                    total_file_bytes = file_offset + bytes_matched
+                    total_image_bytes = image_offset + bytes_matched
+                    # Round up to include any partial block
+                    file_end_block = (total_file_bytes + self.block_size - 1) // self.block_size
+                    image_end_block = (total_image_bytes + self.block_size - 1) // self.block_size
+
+                    # Check if we met the minimum extent requirement
+                    if file_end_block - file_start_block >= min_extent_blocks:
+                        return file_end_block, image_end_block
+                    else:
+                        return None
+
+            # All bytes in this chunk matched
+            bytes_matched += len(file_chunk)
+
+            if len(file_chunk) < bytes_to_read:
+                # Reached end of file
+                break
+
+        # Everything matched to the end
+        total_file_bytes = file_offset + bytes_matched
+        total_image_bytes = image_offset + bytes_matched
+        file_end_block = (total_file_bytes + self.block_size - 1) // self.block_size
+        image_end_block = (total_image_bytes + self.block_size - 1) // self.block_size
+
+        # Check if we met the minimum extent requirement
+        if file_end_block - file_start_block >= min_extent_blocks:
+            return file_end_block, image_end_block
+        else:
+            return None
 
     def process_file(self, file_path: str):
         """
@@ -151,18 +213,41 @@ class ImageProcessor:
         # Generate hash array for this file
         file_hashes = self._generate_hashes_for_file(file_path_obj)
 
-        # Search for the first occurrence of the minimum extent in the image
-        match_index = self._find_extent_in_image(file_path_obj, file_hashes, self.min_extent_blocks)
+        # Get file sizes
+        file_size = file_path_obj.stat().st_size
+        image_size = self.image_file.stat().st_size
 
-        if match_index is not None:
-            # Found a match at block position match_index
-            byte_offset = match_index * self.block_size
-            # TODO: Generate shell script commands to extract this extent
-            pass
-        else:
-            # No match found for the minimum extent
-            # TODO: Handle files that don't have reusable extents
-            pass
+        # Open files once for the entire processing loop
+        with open(file_path_obj, 'rb') as file_f, open(self.image_file, 'rb') as image_f:
+            # Process the file in a loop, finding matches and handling unmatched sections
+            current_block = 0
+
+            while current_block < len(file_hashes):
+                # Search for the next occurrence of the minimum extent in the image
+                match_result = self._find_extent_in_image(
+                    file_f, image_f, file_size, image_size,
+                    file_hashes, self.min_extent_blocks, current_block
+                )
+
+                if match_result is not None:
+                    # Found a match - match_result is (file_start_block, file_end_block, image_start_block, image_end_block)
+                    file_start_block, file_end_block, image_start_block, image_end_block = match_result
+
+                    file_start_byte = file_start_block * self.block_size
+                    file_end_byte = file_end_block * self.block_size
+                    image_start_byte = image_start_block * self.block_size
+                    image_end_byte = image_end_block * self.block_size
+
+                    # TODO: Generate shell script commands to extract this extent from the image
+                    # For now, just continue processing
+
+                    # Continue from the end of this match
+                    current_block = file_end_block
+                else:
+                    # No match found - skip forward by minimum extent size
+                    current_block += self.min_extent_blocks
+
+                    # TODO: Handle the unmatched section (will need to be included literally in output)
 
     def finalize(self):
         """Finish processing - write shell script footer."""
