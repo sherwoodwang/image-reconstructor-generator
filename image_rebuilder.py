@@ -126,6 +126,12 @@ Examples:
         help='Write shell script to FILE instead of stdout'
     )
 
+    parser.add_argument(
+        '--force-terminal-output',
+        action='store_true',
+        help='Allow writing binary data to terminal (use with caution)'
+    )
+
     args = parser.parse_args()
 
     # Verify the image file exists
@@ -134,6 +140,17 @@ Examples:
 
     if not args.image.is_file():
         parser.error(f"Image path is not a file: {args.image}")
+
+    # Check if output is a terminal (not redirected)
+    # The output contains binary data that shouldn't be printed to terminal
+    if args.output == sys.stdout and args.output.isatty() and not args.force_terminal_output:
+        parser.error(
+            "Refusing to write binary data to terminal.\n"
+            "Please redirect output to a file using:\n"
+            "  - Shell redirection: %(prog)s ... > output.sh\n"
+            "  - Or use the -o option: %(prog)s ... -o output.sh\n"
+            "  - Or force terminal output: %(prog)s ... --force-terminal-output"
+        )
 
     # Initialize the processor
     processor = ImageProcessor(args.image, args.output)
