@@ -31,6 +31,7 @@ class ImageProcessor:
         self.min_extent_blocks = min_extent_size // block_size
         self.output_stream = output_stream
         self.image_hashes = self._generate_image_hashes()
+        self.matches = []  # List of (file_path, file_start_byte, file_end_byte, image_start_byte, image_end_byte) tuples
 
     def _generate_hashes_for_file(self, file_path):
         """
@@ -203,22 +204,36 @@ class ImageProcessor:
         Args:
             file_path: Path to the file to process
         """
+        # Canonicalize and validate the file path
+        import os
+
+        # Convert to relative path from working directory - this is required since
+        # the file_path will be embedded in the generated shell script
+        try:
+            relative_path = Path(os.path.normpath(os.path.abspath(file_path))).relative_to(Path.cwd())
+            relative_path = Path(os.path.normpath(str(relative_path)))
+        except (OSError, ValueError) as e:
+            raise ValueError(f"Cannot make path '{file_path}' relative to working directory: {e}")
+        
+        # Ensure relative_path doesn't contain ..
+        if '..' in relative_path.parts:
+            raise ValueError(f"Path '{file_path}' contains '..' components that would escape the working directory")
+        
         # Verify the file exists and is accessible
-        file_path_obj = Path(file_path)
-        if not file_path_obj.exists():
+        if not relative_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
-        if not file_path_obj.is_file():
+        if not relative_path.is_file():
             raise ValueError(f"Path is not a file: {file_path}")
 
         # Generate hash array for this file
-        file_hashes = self._generate_hashes_for_file(file_path_obj)
+        file_hashes = self._generate_hashes_for_file(relative_path)
 
         # Get file sizes
-        file_size = file_path_obj.stat().st_size
-        image_size = self.image_file.stat().st_size
+        file_size = relative_path.stat().st_size
+        image_size = os.path.getsize(str(self.image_file))
 
         # Open files once for the entire processing loop
-        with open(file_path_obj, 'rb') as file_f, open(self.image_file, 'rb') as image_f:
+        with open(relative_path, 'rb') as file_f, open(self.image_file, 'rb') as image_f:
             # Process the file in a loop, finding matches and handling unmatched sections
             current_block = 0
 
@@ -238,8 +253,8 @@ class ImageProcessor:
                     image_start_byte = image_start_block * self.block_size
                     image_end_byte = image_end_block * self.block_size
 
-                    # TODO: Generate shell script commands to extract this extent from the image
-                    # For now, just continue processing
+                    # Register this match with the relative file path
+                    self.matches.append((relative_path, file_start_byte, file_end_byte, image_start_byte, image_end_byte))
 
                     # Continue from the end of this match
                     current_block = file_end_block
@@ -250,9 +265,247 @@ class ImageProcessor:
                     # TODO: Handle the unmatched section (will need to be included literally in output)
 
     def finalize(self):
-        """Finish processing - write shell script footer."""
-        # TODO: Implement shell script footer generation
-        pass
+        """
+        Finish processing - generate complete shell script to rebuild the image.
+
+        This method:
+        1. Calls generate_reconstruction_sequence to get the reconstruction sequence
+        2. Creates a layout of concatenated selected data from the image
+        3. Generates the inner shell script for data copying
+        4. Calls generate_shell_wrapper to create the self-extracting output
+        """
+        # Get the image size
+        image_size = self.image_file.stat().st_size
+
+        # Generate the reconstruction sequence
+        sequence = generate_reconstruction_sequence(self.matches, image_size)
+
+        # Step 1: Identify all ranges selected from the image and create layout
+        # This creates a mapping from original image offsets to concatenated data offsets
+        image_ranges = []  # List of (image_start, image_end) tuples
+
+        # First pass: collect all image ranges
+        for source, start_offset, end_offset in sequence:
+            if source == 'image':
+                image_ranges.append((start_offset, end_offset))
+
+        # Second pass: create offset mapping
+        offset_mapping = {}  # Maps image_offset -> concatenated_offset
+        concatenated_offset = 0
+        for start_offset, end_offset in image_ranges:
+            for i in range(start_offset, end_offset):
+                offset_mapping[i] = concatenated_offset
+                concatenated_offset += 1
+
+        # Step 2: Generate the inner shell script that will copy bytes to reconstruct the image
+        # The generated script will have access to variables injected by generate_shell_wrapper:
+        # - script_file: path to the self-extracting script file (set to "$0")
+        # - data_offset: byte offset where embedded image data begins in the script file
+        script_lines = ['set -e', '']
+        script_lines.append('# Helper functions')
+        script_lines.append('copy_from_script() { dd if="$script_file" bs=1 skip=$((data_offset + $1)) count=$2 2>/dev/null; }')
+        script_lines.append('copy_from_file() { dd if="$1" bs=1 skip=$2 count=$3 2>/dev/null; }')
+        script_lines.append('')
+
+        for source, start_offset, end_offset in sequence:
+            size = end_offset - start_offset
+            if size == 0:
+                # Skip zero-size ranges
+                continue
+
+            if source == 'image':
+                # Copy from concatenated data in this script
+                concat_offset = offset_mapping[start_offset]
+                script_lines.append(f'copy_from_script {concat_offset} {size}')
+            else:
+                # Copy from input file (source is the file path)
+                # Use shell quoting to handle file paths with special characters
+                # The file path is used as-is since the script runs in the same directory
+                escaped_path = source.replace("'", "'\"'\"'")  # Escape single quotes for shell
+                script_lines.append(f"copy_from_file '{escaped_path}' {start_offset} {size}")
+
+        script_text = '\n'.join(script_lines) + '\n'
+
+        # Step 3: Generate the self-extracting wrapper script
+        generate_shell_wrapper(script_text, image_ranges, self.image_file, self.output_stream)
+
+
+def generate_reconstruction_sequence(matches, image_size):
+    """
+    Generate a sequence of records to reconstruct the image file.
+
+    Takes unsorted matches and produces a sequence of records that describes how to
+    reconstruct the entire image. Each record specifies a source (either 'image' or
+    a file path), start offset, and end offset. The sequence covers the entire image,
+    preferring input files as sources whenever possible.
+
+    Args:
+        matches: List of tuples (file_path, file_start_byte, file_end_byte, image_start_byte, image_end_byte)
+                 where each tuple represents a match between an input file and the image.
+        image_size: Total size of the image in bytes.
+
+    Returns:
+        List of tuples (source, start_offset, end_offset) where:
+        - source is either 'image' or a file path from the input files
+        - start_offset is the starting byte position in the source
+        - end_offset is the ending byte position in the source (exclusive)
+
+    Example:
+        If image is 1000 bytes and we have a match from bytes 100-200 in 'file.txt'
+        that corresponds to bytes 300-400 in the image, the sequence would be:
+        [('image', 0, 300), ('file.txt', 100, 200), ('image', 400, 1000)]
+    """
+    if not matches:
+        # No matches - entire image needs to be used
+        return [('image', 0, image_size)]
+
+    # Sort by image_start_byte ascending, then by image_end_byte descending
+    # This ensures we process matches in order of where they appear in the image,
+    # and prefer longer matches when there are overlaps
+    sorted_matches = sorted(matches, key=lambda m: (m[3], -m[4]))
+
+    # Deduplicate overlapping matches
+    deduplicated_matches = []
+    last_end = 0  # Track the last end position in the image
+
+    for file_path, file_start_byte, file_end_byte, image_start_byte, image_end_byte in sorted_matches:
+        # If the last end is later than or equal to the end of this match, skip it
+        if last_end >= image_end_byte:
+            continue
+
+        # Calculate the offset adjustment if there's overlap
+        if last_end > image_start_byte:
+            # There's partial overlap - adjust the start positions
+            offset = last_end - image_start_byte
+            adjusted_file_start = file_start_byte + offset
+            adjusted_image_start = image_start_byte + offset
+        else:
+            # No overlap
+            adjusted_file_start = file_start_byte
+            adjusted_image_start = image_start_byte
+
+        # Record this match (with adjusted positions if needed)
+        deduplicated_matches.append((
+            file_path,
+            adjusted_file_start,
+            file_end_byte,
+            adjusted_image_start,
+            image_end_byte
+        ))
+
+        # Update last_end to the end of this match
+        last_end = image_end_byte
+
+    # Now generate the reconstruction sequence
+    # This includes both matched sections (from files) and unmatched sections (from image)
+    reconstruction_sequence = []
+    current_pos = 0
+
+    for file_path, file_start_byte, file_end_byte, image_start_byte, image_end_byte in deduplicated_matches:
+        # If there's a gap before this match, fill it with image data
+        if current_pos < image_start_byte:
+            reconstruction_sequence.append(('image', current_pos, image_start_byte))
+
+        # Add the matched section from the file
+        reconstruction_sequence.append((file_path, file_start_byte, file_end_byte))
+
+        # Move current position to the end of this match
+        current_pos = image_end_byte
+
+    # If there's remaining image data after the last match, add it
+    if current_pos < image_size:
+        reconstruction_sequence.append(('image', current_pos, image_size))
+
+    return reconstruction_sequence
+
+
+def generate_shell_wrapper(script_text, attachment_ranges, attachment_file, output_stream):
+    """
+    Generate a self-extracting shell script wrapper.
+
+    Takes a shell script and wraps it in a self-extracting format with embedded
+    attachment data. The wrapper embeds the script directly and calculates proper
+    offsets for extraction.
+
+    Args:
+        script_text: Shell script text (as string) to be embedded
+        attachment_ranges: List of (start_offset, end_offset) tuples specifying which
+                          ranges of the attachment file to include in the output
+        attachment_file: Path to the attachment file to extract data from
+        output_stream: Binary stream to write the complete shell script to (must support
+                      binary write operations)
+
+    The generated script structure:
+    1. Header with embedded script and data offset variable
+    2. Concatenated selected attachment data
+
+    Example:
+        script_text = "#!/bin/sh\\ndd if=file.bin bs=1 count=100\\n"
+        attachment_ranges = [(0, 50), (200, 300)]
+        generate_shell_wrapper(script_text, attachment_ranges, Path('img.bin'), output_file)
+    """
+    # Step 1: Create the complete script with embedded reconstruction script and placeholder
+    # Placeholder will be a 10-digit number that we can replace later
+    import textwrap
+
+    placeholder = b'data_offset=0000000000'
+
+    # Encode each segment separately and concatenate as bytes in a single expression
+    header_bytes = (
+        textwrap.dedent('''\
+            #!/bin/sh
+            set -e
+            ''').encode('utf-8')
+        + placeholder
+        + textwrap.dedent('''\
+
+            script_file="$0"
+
+            # Embedded reconstruction script
+            ''').encode('utf-8')
+        + script_text.encode('utf-8')
+        + textwrap.dedent('''\
+            exit 0
+
+            ''').encode('utf-8')
+    )
+
+    # Step 2: Calculate actual offset
+    data_offset = len(header_bytes)
+
+    # Replace placeholder with actual offset in bytes
+    # We need to keep the same byte length, so pad with spaces on the RIGHT
+    # Format: 'data_offset=123       ' (number followed by spaces to fill 10 chars)
+    data_offset_bytes = str(data_offset).ljust(10).encode('ascii')
+
+    # Replace in bytes - only replace the FIRST occurrence to avoid accidentally
+    # replacing the same pattern if it appears in the embedded script
+    replacement = b'data_offset=' + data_offset_bytes
+    if placeholder not in header_bytes:
+        raise ValueError(f"Placeholder '{placeholder}' not found in header")
+    header_bytes = header_bytes.replace(placeholder, replacement, 1)
+
+    # Step 4: Output the complete script
+    # Get the binary output buffer
+    if hasattr(output_stream, 'buffer'):
+        # Real file or stdout - use binary buffer
+        output_buffer = output_stream.buffer
+    else:
+        # Already a binary stream
+        output_buffer = output_stream
+
+    # Write header (which contains the embedded script)
+    output_buffer.write(header_bytes)
+
+    # Write concatenated attachment data
+    with open(attachment_file, 'rb') as attach_f:
+        for start_offset, end_offset in attachment_ranges:
+            attach_f.seek(start_offset)
+            data = attach_f.read(end_offset - start_offset)
+            output_buffer.write(data)
+
+    # Flush to ensure everything is written
+    output_buffer.flush()
 
 
 def read_file_list(input_stream, null_separated: bool):

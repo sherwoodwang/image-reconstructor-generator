@@ -40,7 +40,9 @@ class TestMainFunction(unittest.TestCase):
         with patch('sys.argv', ['image_rebuilder.py', str(self.image_file)]):
             with patch('sys.stdin', StringIO(test_input)):
                 with patch('sys.stderr', StringIO()):
-                    main()
+                    with patch('sys.stdout') as mock_stdout:
+                        mock_stdout.isatty.return_value = False
+                        main()
 
         # Verify processor methods were called
         mock_processor.begin.assert_called_once()
@@ -59,7 +61,9 @@ class TestMainFunction(unittest.TestCase):
 
         with patch('sys.argv', ['image_rebuilder.py', str(self.image_file), '-i', str(input_file)]):
             with patch('sys.stderr', StringIO()):
-                main()
+                with patch('sys.stdout') as mock_stdout:
+                    mock_stdout.isatty.return_value = False
+                    main()
 
         # Verify processor methods were called
         mock_processor.begin.assert_called_once()
@@ -77,7 +81,9 @@ class TestMainFunction(unittest.TestCase):
         with patch('sys.argv', ['image_rebuilder.py', '-0', str(self.image_file)]):
             with patch('sys.stdin', StringIO(test_input)):
                 with patch('sys.stderr', StringIO()):
-                    main()
+                    with patch('sys.stdout') as mock_stdout:
+                        mock_stdout.isatty.return_value = False
+                        main()
 
         # Verify processor methods were called
         mock_processor.begin.assert_called_once()
@@ -136,7 +142,9 @@ class TestMainFunction(unittest.TestCase):
             with patch('sys.stdin', StringIO(test_input)):
                 stderr_capture = StringIO()
                 with patch('sys.stderr', stderr_capture):
-                    main()
+                    with patch('sys.stdout') as mock_stdout:
+                        mock_stdout.isatty.return_value = False
+                        main()
 
         stderr_output = stderr_capture.getvalue()
         self.assertIn("Processed 3 files", stderr_output)
@@ -153,7 +161,9 @@ class TestMainFunction(unittest.TestCase):
             with patch('sys.stdin', StringIO(test_input)):
                 stderr_capture = StringIO()
                 with patch('sys.stderr', stderr_capture):
-                    main()
+                    with patch('sys.stdout') as mock_stdout:
+                        mock_stdout.isatty.return_value = False
+                        main()
 
         # Verify processor methods were called
         mock_processor.begin.assert_called_once()
@@ -178,7 +188,9 @@ class TestMainFunction(unittest.TestCase):
                     with patch('image_rebuilder.ImageProcessor') as mock_processor_class:
                         mock_processor = MagicMock()
                         mock_processor_class.return_value = mock_processor
-                        main()
+                        with patch('sys.stdout') as mock_stdout:
+                            mock_stdout.isatty.return_value = False
+                            main()
 
                         # Verify ImageProcessor was called with block_size=512
                         call_args = mock_processor_class.call_args
@@ -198,7 +210,9 @@ class TestMainFunction(unittest.TestCase):
                     with patch('image_rebuilder.ImageProcessor') as mock_processor_class:
                         mock_processor = MagicMock()
                         mock_processor_class.return_value = mock_processor
-                        main()
+                        with patch('sys.stdout') as mock_stdout:
+                            mock_stdout.isatty.return_value = False
+                            main()
 
                         # Verify ImageProcessor was called with block_size=2048
                         call_args = mock_processor_class.call_args
