@@ -772,6 +772,9 @@ class TestReconstructionScriptExecution(unittest.TestCase):
             with tempfile.NamedTemporaryFile(delete=False, suffix='.reconstructed') as out:
                 output_file = Path(out.name)
 
+            # Delete the file so the script can create it
+            output_file.unlink()
+
             # Run the reconstruction script
             result = subprocess.run(
                 [str(script_path), str(output_file)],
