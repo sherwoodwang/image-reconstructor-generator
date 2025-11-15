@@ -18,6 +18,7 @@ import grp
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
+from datetime import datetime
 
 
 class ImageInfo(NamedTuple):
@@ -40,7 +41,8 @@ class ImageProcessor:
     """Processes files and generates shell script to rebuild an image."""
 
     def __init__(self, image_file: Path, output_stream=sys.stdout, block_size: int = 4096, min_extent_size: int = 1048576,
-                 capture_ownership: bool = True, capture_acl: bool = True, capture_md5: bool = True, capture_sha256: bool = True):
+                 capture_ownership: bool = True, capture_acl: bool = True, capture_md5: bool = True, capture_sha256: bool = True,
+                 verbose: bool = False):
         """
         Initialize the image processor.
 
@@ -53,6 +55,7 @@ class ImageProcessor:
             capture_acl: Whether to capture ACL information for the image file (default: True)
             capture_md5: Whether to calculate MD5 hash for the image file (default: True)
             capture_sha256: Whether to calculate SHA256 hash for the image file (default: True)
+            verbose: Whether to print timestamped progress messages to stderr (default: False)
         """
         self.image_file = image_file
         self.block_size = block_size
@@ -63,10 +66,17 @@ class ImageProcessor:
         self.capture_acl = capture_acl
         self.capture_md5 = capture_md5
         self.capture_sha256 = capture_sha256
+        self.verbose = verbose
         self.image_hashes: list[int] = []
         self.image_info: ImageInfo
         self.matches = []  # List of (file_path, file_start_byte, file_end_byte, image_start_byte, image_end_byte) tuples
         self._initialize()
+
+    def _log(self, message: str):
+        """Print a timestamped message to stderr if verbose mode is enabled."""
+        if self.verbose:
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+            print(f"[{timestamp}] {message}", file=sys.stderr)
 
     def _initialize(self):
         """
@@ -122,18 +132,22 @@ class ImageProcessor:
 
             if self.capture_md5:
                 def compute_md5():
+                    self._log("Starting MD5 hash generation")
                     with open(self.image_file, 'rb') as f:
                         digest = hashlib.file_digest(f, 'md5')
                     with md5_lock:
                         md5_result[0] = digest.hexdigest()
+                    self._log("Completed MD5 hash generation")
                 compute_hashes.append(('md5', compute_md5))
 
             if self.capture_sha256:
                 def compute_sha256():
+                    self._log("Starting SHA256 hash generation")
                     with open(self.image_file, 'rb') as f:
                         digest = hashlib.file_digest(f, 'sha256')
                     with sha256_lock:
                         sha256_result[0] = digest.hexdigest()
+                    self._log("Completed SHA256 hash generation")
                 compute_hashes.append(('sha256', compute_sha256))
 
             # Run hash calculations in parallel
@@ -162,7 +176,9 @@ class ImageProcessor:
         )
 
         # Generate block hashes for the image
+        self._log("Starting image block hash generation")
         self.image_hashes = self._generate_image_hashes()
+        self._log("Completed image block hash generation")
 
     def _generate_hashes_for_file(self, file_path):
         """
@@ -345,16 +361,18 @@ class ImageProcessor:
             relative_path = Path(os.path.normpath(str(relative_path)))
         except (OSError, ValueError) as e:
             raise ValueError(f"Cannot make path '{file_path}' relative to working directory: {e}")
-        
+
         # Ensure relative_path doesn't contain ..
         if '..' in relative_path.parts:
             raise ValueError(f"Path '{file_path}' contains '..' components that would escape the working directory")
-        
+
         # Verify the file exists and is accessible
         if not relative_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
         if not relative_path.is_file():
             raise ValueError(f"Path is not a file: {file_path}")
+
+        self._log(f"Processing file: {relative_path}")
 
         # Generate hash array for this file
         file_hashes = self._generate_hashes_for_file(relative_path)
@@ -367,6 +385,7 @@ class ImageProcessor:
         with open(relative_path, 'rb') as file_f, open(self.image_file, 'rb') as image_f:
             # Process the file in a loop, finding matches and handling unmatched sections
             current_block = 0
+            self._log(f"Starting reusable extent detection for {relative_path} (size: {file_size} bytes)")
 
             while current_block < len(file_hashes):
                 # Search for the next occurrence of the minimum extent in the image
@@ -387,11 +406,19 @@ class ImageProcessor:
                     # Register this match with the relative file path
                     self.matches.append((relative_path, file_start_byte, file_end_byte, image_start_byte, image_end_byte))
 
+                    # Log the extent match
+                    extent_size = file_end_byte - file_start_byte
+                    self._log(f"Found reusable extent: {file_start_byte}-{file_end_byte} ({extent_size} bytes) -> image offset {image_start_byte}")
+
                     # Continue from the end of this match
                     current_block = file_end_block
                 else:
                     # No match found - skip forward by minimum extent size
                     current_block += self.min_extent_blocks
+
+            # Log completion with summary
+            current_byte = current_block * self.block_size
+            self._log(f"Completed reusable extent detection for {relative_path} (processed: {min(current_byte, file_size)}/{file_size} bytes)")
 
     def finalize(self):
         """
@@ -403,10 +430,13 @@ class ImageProcessor:
         3. Generates the inner shell script for data copying
         4. Calls generate_shell_wrapper to create the self-extracting output
         """
+        self._log("Starting finalization - generating reconstruction script")
+
         # Get the image size
         image_size = self.image_file.stat().st_size
 
         # Generate the reconstruction sequence
+        self._log("Generating reconstruction sequence")
         sequence = generate_reconstruction_sequence(self.matches, image_size)
 
         # Step 1: Identify all ranges selected from the image and create layout
@@ -427,14 +457,20 @@ class ImageProcessor:
                 concatenated_offset += 1
 
         # Step 2: Generate the inner shell script that will copy bytes to reconstruct the image
+        self._log("Generating reconstruction script")
         script_text = self._generate_reconstruction_script(sequence, offset_mapping, self.image_info)
 
         # Step 3: Generate the self-extracting wrapper script
+        self._log("Generating self-extracting shell wrapper")
         generate_shell_wrapper(script_text, image_ranges, self.image_file, self.output_stream)
+        self._log("Completed finalization")
 
     def _generate_reconstruction_script(self, sequence, offset_mapping, image_info: ImageInfo) -> str:
         """Generate the complete reconstruction script with validation and restoration."""
         script_lines = []
+
+        # Extract unique file list from sequence (excluding 'image' entries)
+        source_files = sorted(set(source for source, _, _ in sequence if source != 'image'))
 
         # Script header with usage and argument parsing
         script_lines.extend([
@@ -521,9 +557,18 @@ class ImageProcessor:
         if image_info.sha256:
             script_lines.append(f'  SHA256:      {image_info.sha256}')
         if image_info.acl:
-            script_lines.extend([
-                '  ACL:         Available',
-            ])
+            script_lines.append('  ACL:         Available')
+
+        # Add source files list
+        script_lines.append('')
+        script_lines.append('Source Files:')
+        if source_files:
+            for file_path in source_files:
+                # Escape the file path for display
+                escaped_path = file_path.replace("'", "'\"'\"'")
+                script_lines.append(f"  '{escaped_path}'")
+        else:
+            script_lines.append('  (no external files - image reconstructed from embedded data only)')
 
         script_lines.extend([
             'EOF',
@@ -538,8 +583,18 @@ class ImageProcessor:
             'fi',
             '',
             '# Helper functions',
-            'copy_from_script() { dd if="$script_file" bs=1 skip=$((data_offset + $1)) count=$2 2>/dev/null; }',
-            'copy_from_file() { dd if="$1" bs=1 skip=$2 count=$3 2>/dev/null; }',
+            'copy_from_script() {',
+            '    if ! dd if="$script_file" bs=1 skip=$((data_offset + $1)) count=$2 2>/dev/null; then',
+            '        echo "Error: Failed to copy $2 bytes from embedded data at offset $1" >&2',
+            '        exit 1',
+            '    fi',
+            '}',
+            'copy_from_file() {',
+            '    if ! dd if="$1" bs=1 skip=$2 count=$3 2>/dev/null; then',
+            r'        echo "Error: Failed to copy $3 bytes from file '"'"'$1'"'"' at offset $2" >&2',
+            '        exit 1',
+            '    fi',
+            '}',
             '',
         ])
 
@@ -1045,6 +1100,12 @@ Examples:
         help='Skip calculating SHA256 hash for the image file'
     )
 
+    parser.add_argument(
+        '-v', '--verbose',
+        action='store_true',
+        help='Enable verbose mode with timestamped progress messages to stderr'
+    )
+
     args = parser.parse_args()
 
     # Validate min-extent-size is a multiple of block-size
@@ -1078,7 +1139,8 @@ Examples:
         capture_ownership=not args.no_ownership,
         capture_acl=not args.no_acl,
         capture_md5=not args.no_md5,
-        capture_sha256=not args.no_sha256
+        capture_sha256=not args.no_sha256,
+        verbose=args.verbose
     )
 
     try:

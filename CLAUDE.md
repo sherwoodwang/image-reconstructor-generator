@@ -34,12 +34,25 @@ All tests must pass before committing.
 
 ## Type Checking
 
+This project uses pyright for static type checking.
+
+**Installation:**
+
+Pyright should be installed in the virtual environment:
+
+```bash
+source venv/bin/activate
+pip install pyright
+```
+
 **Run pyright type checking frequently during development:**
 
 ```bash
+source venv/bin/activate
 pyright image_rebuilder.py
 ```
 
 - Run pyright after any non-trivial changes to catch type errors early
 - All code must pass type checking with 0 errors before committing
 - Type checking helps catch potential bugs and improves code quality
+- Always run pyright from within the activated virtual environment

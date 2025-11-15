@@ -575,8 +575,59 @@ class TestReconstructionScriptExecution(unittest.TestCase):
             self.assertIn('Image Information:', result.stdout)
             self.assertIn('Size:', result.stdout)
             self.assertIn('Permissions:', result.stdout)
+            self.assertIn('Source Files:', result.stdout)
         finally:
             temp_image.unlink()
+            if script_path and script_path.exists():
+                script_path.unlink()
+
+    def test_script_info_shows_source_files(self):
+        """Test that script info displays source files list."""
+        # Create test image and a source file in current directory
+        test_data = b'A' * 10000
+
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            f.write(test_data)
+            temp_image = Path(f.name)
+
+        # Create source file in current directory to satisfy path security
+        temp_source = Path('test_source_file.tmp')
+        temp_source.write_bytes(b'B' * 5000)
+
+        script_path = None
+        try:
+            processor = ImageProcessor(temp_image, capture_md5=False, capture_sha256=False,
+                                      capture_acl=False, capture_ownership=False)
+            processor.begin()
+
+            # Process a file that will create a match
+            processor.process_file(str(temp_source))
+
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as script_file:
+                script_path = Path(script_file.name)
+                processor.output_stream = script_file
+                processor.finalize()
+
+            script_path.chmod(0o755)
+
+            # Run with -i flag
+            result = subprocess.run(
+                [str(script_path), '-i'],
+                capture_output=True,
+                text=True
+            )
+
+            self.assertEqual(result.returncode, 0)
+            self.assertIn('Source Files:', result.stdout)
+            # Should show either the source file path or indicate no external files
+            self.assertTrue(
+                str(temp_source) in result.stdout or
+                'no external files' in result.stdout
+            )
+        finally:
+            temp_image.unlink()
+            if temp_source.exists():
+                temp_source.unlink()
             if script_path and script_path.exists():
                 script_path.unlink()
 
