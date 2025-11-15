@@ -49,7 +49,7 @@ pip install pyright
 
 ```bash
 source venv/bin/activate
-pyright image_rebuilder.py
+pyright image_reconstructor_generator.py
 ```
 
 - Run pyright after any non-trivial changes to catch type errors early

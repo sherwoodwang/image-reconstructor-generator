@@ -1,7 +1,7 @@
 """Tests for OffsetMapper class."""
 
 import unittest
-from image_rebuilder import OffsetMapper
+from image_reconstructor_generator import OffsetMapper
 
 
 class TestOffsetMapper(unittest.TestCase):

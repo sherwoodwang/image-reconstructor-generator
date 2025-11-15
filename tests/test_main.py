@@ -13,7 +13,7 @@ from unittest.mock import patch, MagicMock
 # Add parent directory to path to import the module
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from image_rebuilder import main
+from image_reconstructor_generator import main
 
 
 class TestMainFunction(unittest.TestCase):
@@ -29,7 +29,7 @@ class TestMainFunction(unittest.TestCase):
         """Clean up test fixtures."""
         self.temp_dir.cleanup()
 
-    @patch('image_rebuilder.ImageProcessor')
+    @patch('image_reconstructor_generator.ImageProcessor')
     def test_main_with_stdin(self, mock_processor_class):
         """Test main() with stdin input."""
         mock_processor = MagicMock()
@@ -37,7 +37,7 @@ class TestMainFunction(unittest.TestCase):
 
         test_input = "file1.txt\nfile2.txt\n"
 
-        with patch('sys.argv', ['image_rebuilder.py', str(self.image_file)]):
+        with patch('sys.argv', ['image_reconstructor_generator.py', str(self.image_file)]):
             with patch('sys.stdin', StringIO(test_input)):
                 with patch('sys.stderr', StringIO()):
                     with patch('sys.stdout') as mock_stdout:
@@ -49,7 +49,7 @@ class TestMainFunction(unittest.TestCase):
         self.assertEqual(mock_processor.process_file.call_count, 2)
         mock_processor.generate_script.assert_called_once()
 
-    @patch('image_rebuilder.ImageProcessor')
+    @patch('image_reconstructor_generator.ImageProcessor')
     def test_main_with_input_file(self, mock_processor_class):
         """Test main() with input file."""
         mock_processor = MagicMock()
@@ -59,7 +59,7 @@ class TestMainFunction(unittest.TestCase):
         input_file = Path(self.temp_dir.name) / "files.txt"
         input_file.write_text("file1.txt\nfile2.txt\nfile3.txt\n")
 
-        with patch('sys.argv', ['image_rebuilder.py', str(self.image_file), '-i', str(input_file)]):
+        with patch('sys.argv', ['image_reconstructor_generator.py', str(self.image_file), '-i', str(input_file)]):
             with patch('sys.stderr', StringIO()):
                 with patch('sys.stdout') as mock_stdout:
                     mock_stdout.isatty.return_value = False
@@ -70,7 +70,7 @@ class TestMainFunction(unittest.TestCase):
         self.assertEqual(mock_processor.process_file.call_count, 3)
         mock_processor.generate_script.assert_called_once()
 
-    @patch('image_rebuilder.ImageProcessor')
+    @patch('image_reconstructor_generator.ImageProcessor')
     def test_main_with_null_separated(self, mock_processor_class):
         """Test main() with null-separated input."""
         mock_processor = MagicMock()
@@ -78,7 +78,7 @@ class TestMainFunction(unittest.TestCase):
 
         test_input = "file1.txt\0file2.txt\0"
 
-        with patch('sys.argv', ['image_rebuilder.py', '-0', str(self.image_file)]):
+        with patch('sys.argv', ['image_reconstructor_generator.py', '-0', str(self.image_file)]):
             with patch('sys.stdin', StringIO(test_input)):
                 with patch('sys.stderr', StringIO()):
                     with patch('sys.stdout') as mock_stdout:
@@ -90,7 +90,7 @@ class TestMainFunction(unittest.TestCase):
         self.assertEqual(mock_processor.process_file.call_count, 2)
         mock_processor.generate_script.assert_called_once()
 
-    @patch('image_rebuilder.ImageProcessor')
+    @patch('image_reconstructor_generator.ImageProcessor')
     def test_main_with_output_file(self, mock_processor_class):
         """Test main() with output file."""
         mock_processor = MagicMock()
@@ -99,7 +99,7 @@ class TestMainFunction(unittest.TestCase):
         output_file = Path(self.temp_dir.name) / "output.sh"
         test_input = "file1.txt\n"
 
-        with patch('sys.argv', ['image_rebuilder.py', str(self.image_file), '-o', str(output_file)]):
+        with patch('sys.argv', ['image_reconstructor_generator.py', str(self.image_file), '-o', str(output_file)]):
             with patch('sys.stdin', StringIO(test_input)):
                 with patch('sys.stderr', StringIO()):
                     main()
@@ -111,7 +111,7 @@ class TestMainFunction(unittest.TestCase):
         """Test main() with nonexistent image file."""
         nonexistent = Path(self.temp_dir.name) / "nonexistent.img"
 
-        with patch('sys.argv', ['image_rebuilder.py', str(nonexistent)]):
+        with patch('sys.argv', ['image_reconstructor_generator.py', str(nonexistent)]):
             with patch('sys.stderr', StringIO()):
                 with self.assertRaises(SystemExit) as cm:
                     main()
@@ -123,14 +123,14 @@ class TestMainFunction(unittest.TestCase):
         dir_path = Path(self.temp_dir.name) / "testdir"
         dir_path.mkdir()
 
-        with patch('sys.argv', ['image_rebuilder.py', str(dir_path)]):
+        with patch('sys.argv', ['image_reconstructor_generator.py', str(dir_path)]):
             with patch('sys.stderr', StringIO()):
                 with self.assertRaises(SystemExit) as cm:
                     main()
 
                 self.assertEqual(cm.exception.code, 2)
 
-    @patch('image_rebuilder.ImageProcessor')
+    @patch('image_reconstructor_generator.ImageProcessor')
     def test_main_counts_files(self, mock_processor_class):
         """Test that main() counts files correctly (file count is tracked in processor)."""
         mock_processor = MagicMock()
@@ -138,7 +138,7 @@ class TestMainFunction(unittest.TestCase):
 
         test_input = "file1.txt\nfile2.txt\nfile3.txt\n"
 
-        with patch('sys.argv', ['image_rebuilder.py', str(self.image_file)]):
+        with patch('sys.argv', ['image_reconstructor_generator.py', str(self.image_file)]):
             with patch('sys.stdin', StringIO(test_input)):
                 with patch('sys.stdout') as mock_stdout:
                     mock_stdout.isatty.return_value = False
@@ -149,7 +149,7 @@ class TestMainFunction(unittest.TestCase):
         self.assertEqual(mock_processor.process_file.call_count, 3)
         mock_processor.generate_script.assert_called_once()
 
-    @patch('image_rebuilder.ImageProcessor')
+    @patch('image_reconstructor_generator.ImageProcessor')
     def test_main_empty_input(self, mock_processor_class):
         """Test main() with empty input."""
         mock_processor = MagicMock()
@@ -157,7 +157,7 @@ class TestMainFunction(unittest.TestCase):
 
         test_input = ""
 
-        with patch('sys.argv', ['image_rebuilder.py', str(self.image_file)]):
+        with patch('sys.argv', ['image_reconstructor_generator.py', str(self.image_file)]):
             with patch('sys.stdin', StringIO(test_input)):
                 with patch('sys.stdout') as mock_stdout:
                     mock_stdout.isatty.return_value = False
@@ -173,14 +173,14 @@ class TestMainFunction(unittest.TestCase):
         self.image_file.write_bytes(b"A" * 5000)
 
         with patch('sys.argv', [
-            'image_rebuilder.py',
+            'image_reconstructor_generator.py',
             str(self.image_file),
             '--block-size', '512'
         ]):
             with patch('sys.stdin', StringIO("")):
                 with patch('sys.stderr', StringIO()):
                     # Capture the processor that was created
-                    with patch('image_rebuilder.ImageProcessor') as mock_processor_class:
+                    with patch('image_reconstructor_generator.ImageProcessor') as mock_processor_class:
                         mock_processor = MagicMock()
                         mock_processor_class.return_value = mock_processor
                         with patch('sys.stdout') as mock_stdout:
@@ -196,13 +196,13 @@ class TestMainFunction(unittest.TestCase):
         self.image_file.write_bytes(b"A" * 5000)
 
         with patch('sys.argv', [
-            'image_rebuilder.py',
+            'image_reconstructor_generator.py',
             str(self.image_file),
             '-b', '2048'
         ]):
             with patch('sys.stdin', StringIO("")):
                 with patch('sys.stderr', StringIO()):
-                    with patch('image_rebuilder.ImageProcessor') as mock_processor_class:
+                    with patch('image_reconstructor_generator.ImageProcessor') as mock_processor_class:
                         mock_processor = MagicMock()
                         mock_processor_class.return_value = mock_processor
                         with patch('sys.stdout') as mock_stdout:

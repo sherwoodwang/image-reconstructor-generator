@@ -8,7 +8,7 @@ from pathlib import Path
 from io import BytesIO
 from typing import cast, Match
 
-from image_rebuilder import generate_shell_wrapper
+from image_reconstructor_generator import generate_shell_wrapper
 
 
 class TestShellWrapper(unittest.TestCase):

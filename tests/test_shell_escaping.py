@@ -15,7 +15,7 @@ import os
 # Add parent directory to path to import the module
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from image_rebuilder import escape_for_shell_display
+from image_reconstructor_generator import escape_for_shell_display
 
 
 class TestShellEscaping(unittest.TestCase):

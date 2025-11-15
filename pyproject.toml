@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "image-rebuilder"
+name = "image-reconstructor-generator"
 version = "0.1.0"
-description = "A tool to create shell scripts that rebuild image files from extracted files"
+description = "A tool to create shell scripts that reconstruct image files from extracted files"
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = [
@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.scripts]
-image-rebuilder = "image_rebuilder:main"
+image-reconstructor-generator = "image_reconstructor_generator:main"
 
 [project.optional-dependencies]
 dev = [
@@ -21,4 +21,4 @@ dev = [
 ]
 
 [tool.setuptools]
-py-modules = ["image_rebuilder"]
+py-modules = ["image_reconstructor_generator"]

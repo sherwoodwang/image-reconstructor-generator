@@ -14,7 +14,7 @@ import time
 # Add parent directory to path to import the module
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from image_rebuilder import ImageProcessor
+from image_reconstructor_generator import ImageProcessor
 
 
 class TestTimestampHandling(unittest.TestCase):
@@ -49,7 +49,7 @@ class TestTimestampHandling(unittest.TestCase):
             source_file.write_bytes(image_data)
 
             # Generate script
-            script_file = self.test_dir_path / "rebuild.sh"
+            script_file = self.test_dir_path / "reconstruct.sh"
             with open(script_file, 'wb') as f:
                 processor = ImageProcessor(
                     image_file,
@@ -106,7 +106,7 @@ class TestTimestampHandling(unittest.TestCase):
             source_file.write_bytes(image_data)
 
             # Generate script
-            script_file = self.test_dir_path / "rebuild.sh"
+            script_file = self.test_dir_path / "reconstruct.sh"
             with open(script_file, 'wb') as f:
                 processor = ImageProcessor(
                     image_file,
@@ -157,7 +157,7 @@ class TestTimestampHandling(unittest.TestCase):
         image_file.write_bytes(image_data)
 
         # Generate script
-        script_file = self.test_dir_path / "rebuild.sh"
+        script_file = self.test_dir_path / "reconstruct.sh"
         with open(script_file, 'wb') as f:
             processor = ImageProcessor(image_file, f)
             processor.generate_script()
@@ -195,7 +195,7 @@ class TestTimestampHandling(unittest.TestCase):
             source_file.write_bytes(image_data)
 
             # Generate script
-            script_file = self.test_dir_path / "rebuild.sh"
+            script_file = self.test_dir_path / "reconstruct.sh"
             with open(script_file, 'wb') as f:
                 processor = ImageProcessor(
                     image_file,
@@ -242,7 +242,7 @@ class TestTimestampHandling(unittest.TestCase):
         current_date = datetime.fromtimestamp(current_mtime)
 
         # Generate script
-        script_file = self.test_dir_path / "rebuild.sh"
+        script_file = self.test_dir_path / "reconstruct.sh"
         with open(script_file, 'wb') as f:
             processor = ImageProcessor(image_file, f)
             processor.generate_script()
@@ -290,7 +290,7 @@ class TestTimestampHandling(unittest.TestCase):
             source_file.write_bytes(image_data)
 
             # Generate script
-            script_file = self.test_dir_path / "rebuild.sh"
+            script_file = self.test_dir_path / "reconstruct.sh"
             with open(script_file, 'wb') as f:
                 processor = ImageProcessor(
                     image_file,

@@ -14,7 +14,7 @@ from unittest.mock import patch
 # Add parent directory to path to import the module
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from image_rebuilder import main
+from image_reconstructor_generator import main
 
 
 class TestIntegration(unittest.TestCase):
@@ -53,7 +53,7 @@ class TestIntegration(unittest.TestCase):
         os.chdir(self.temp_dir)
         try:
             with patch('sys.argv', [
-                'image_rebuilder.py',
+                'image_reconstructor_generator.py',
                 str(self.image_file.relative_to(self.temp_dir_path)),
                 '-i', str(input_file.relative_to(self.temp_dir_path)),
                 '-o', str(output_file.relative_to(self.temp_dir_path))
@@ -85,7 +85,7 @@ class TestIntegration(unittest.TestCase):
         os.chdir(self.temp_dir)
         try:
             with patch('sys.argv', [
-                'image_rebuilder.py',
+                'image_reconstructor_generator.py',
                 str(self.image_file.relative_to(self.temp_dir_path)),
                 '-i', str(input_file.relative_to(self.temp_dir_path)),
                 '-o', str(output_file.relative_to(self.temp_dir_path)),

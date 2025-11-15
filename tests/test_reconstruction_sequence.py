@@ -1,7 +1,7 @@
 """Tests for the generate_reconstruction_sequence function."""
 
 import unittest
-from image_rebuilder import generate_reconstruction_sequence
+from image_reconstructor_generator import generate_reconstruction_sequence
 
 
 class TestReconstructionSequence(unittest.TestCase):

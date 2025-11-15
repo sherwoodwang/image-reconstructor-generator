@@ -13,7 +13,7 @@ import os
 # Add parent directory to path to import the module
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from image_rebuilder import ImageProcessor
+from image_reconstructor_generator import ImageProcessor
 
 
 class TestDDEdgeCases(unittest.TestCase):
@@ -52,7 +52,7 @@ class TestDDEdgeCases(unittest.TestCase):
             source_file.write_bytes(image_data)
 
             # Generate script
-            script_file = self.test_dir_path / "rebuild.sh"
+            script_file = self.test_dir_path / "reconstruct.sh"
             with open(script_file, 'wb') as f:
                 processor = ImageProcessor(
                     image_file,
@@ -112,7 +112,7 @@ class TestDDEdgeCases(unittest.TestCase):
             source3.write_bytes(b"C" * block_size)
 
             # Generate script
-            script_file = self.test_dir_path / "rebuild.sh"
+            script_file = self.test_dir_path / "reconstruct.sh"
             with open(script_file, 'wb') as f:
                 processor = ImageProcessor(
                     image_file,
@@ -170,7 +170,7 @@ class TestDDEdgeCases(unittest.TestCase):
             source_file.write_bytes(image_data)
 
             # Generate script
-            script_file = self.test_dir_path / "rebuild.sh"
+            script_file = self.test_dir_path / "reconstruct.sh"
             with open(script_file, 'wb') as f:
                 processor = ImageProcessor(
                     image_file,
@@ -227,7 +227,7 @@ class TestDDEdgeCases(unittest.TestCase):
             source_file.write_bytes(pattern)
 
             # Generate script
-            script_file = self.test_dir_path / "rebuild.sh"
+            script_file = self.test_dir_path / "reconstruct.sh"
             with open(script_file, 'wb') as f:
                 processor = ImageProcessor(
                     image_file,
@@ -267,7 +267,7 @@ class TestDDEdgeCases(unittest.TestCase):
         image_file.write_bytes(b"")
 
         # Generate script
-        script_file = self.test_dir_path / "rebuild.sh"
+        script_file = self.test_dir_path / "reconstruct.sh"
         with open(script_file, 'wb') as f:
             processor = ImageProcessor(image_file, f)
             processor.generate_script()
@@ -312,7 +312,7 @@ class TestDDEdgeCases(unittest.TestCase):
             source_file.write_bytes(image_data)
 
             # Generate script with tiny block size
-            script_file = self.test_dir_path / "rebuild.sh"
+            script_file = self.test_dir_path / "reconstruct.sh"
             with open(script_file, 'wb') as f:
                 processor = ImageProcessor(
                     image_file,
@@ -367,7 +367,7 @@ class TestDDEdgeCases(unittest.TestCase):
             source_file.write_bytes(image_data)
 
             # Generate script with block size larger than file
-            script_file = self.test_dir_path / "rebuild.sh"
+            script_file = self.test_dir_path / "reconstruct.sh"
             with open(script_file, 'wb') as f:
                 processor = ImageProcessor(
                     image_file,
@@ -427,7 +427,7 @@ class TestDDEdgeCases(unittest.TestCase):
 
             # Generate script with min_extent_size < block_size
             # This tests the edge case fix where min_extent_blocks must be >= 1
-            script_file = self.test_dir_path / "rebuild.sh"
+            script_file = self.test_dir_path / "reconstruct.sh"
             with open(script_file, 'wb') as f:
                 processor = ImageProcessor(
                     image_file,
@@ -464,7 +464,7 @@ class TestDDEdgeCases(unittest.TestCase):
         """Test error handling when source file is missing."""
         # This tests the script's error handling, not the processor
         # We'll manually create a script that references a missing file
-        script_file = self.test_dir_path / "rebuild.sh"
+        script_file = self.test_dir_path / "reconstruct.sh"
 
         script_content = '''#!/bin/sh
 set -e

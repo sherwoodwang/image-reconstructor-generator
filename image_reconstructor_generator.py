@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Image Rebuilder - Creates shell scripts to rebuild image files
+Image Reconstructor Generator - Creates shell scripts to reconstruct image files
 
-This tool reads a list of files and generates a POSIX shell script that can
-rebuild an image file from the extracted files.
+This tool reads a list of extracted files and generates a POSIX shell script that can
+reconstruct an image file from those extracted files.
 """
 
 import argparse
@@ -137,7 +137,7 @@ class ImageInfo(NamedTuple):
 
 
 class ImageProcessor:
-    """Processes files and generates shell script to rebuild an image."""
+    """Processes files and generates shell script to reconstruct an image."""
 
     def __init__(self, image_file: Path, output_stream=sys.stdout, block_size: int = 4096, min_extent_size: int = 1048576,
                  capture_ownership: bool = True, capture_acl: bool = True, capture_md5: bool = True, capture_sha256: bool = True,
@@ -606,40 +606,55 @@ class ImageProcessor:
             '    cat >&2 <<EOF',
             'Usage: $0 [options] [output-file]',
             '',
-            'This is a self-extracting reconstruction script that rebuilds an original file',
-            'from embedded binary data and/or external source files. The script reconstructs',
-            'the file by copying data segments in the correct order and optionally verifies',
-            'checksums and restores file metadata (permissions, ownership, timestamps, ACLs).',
+            'DESCRIPTION:',
+            '  This is a self-extracting shell script that reconstructs an image file from',
+            '  embedded binary data and extracted source files. It rebuilds the file by',
+            '  copying data segments in the correct order and can optionally verify',
+            '  integrity using checksums and restore file metadata (permissions, ownership,',
+            '  timestamps, ACLs).',
             '',
-            'Options:',
-            '  -i          Show image information only (do not reconstruct)',
-            '  -M          Skip MD5 verification',
-            '  -S          Skip SHA256 verification',
-            '  -p          Skip permission restoration',
-            '  -o          Skip ownership restoration',
-            '  -t          Skip timestamp restoration',
-            '  -a          Skip ACL restoration',
-            '  -T          Use intermediate temporary file for validation',
-            '  -v          Verbose mode (show progress messages)',
-            f'  -b SIZE     Block size in bytes for dd operations (default: {self.write_chunk_size})',
-            '  -x OPTS     Extra options (comma-separated):',
-            '                gnu-dd      - Force GNU dd mode (requires iflag support)',
-            '                plain-dd    - Force plain dd mode (POSIX compatible)',
-            '                no-dd       - Use only tail/head (most portable)',
-            '                allow-tty   - Allow binary output to terminal (use with caution)',
-            '                overwrite   - Overwrite existing output file if present',
-            '  -h          Show this help message',
+            'POSITIONAL ARGUMENTS:',
+            '  output-file       Output file to write (optional; default: stdout)',
+            '                    If stdout is a terminal, must use -x allow-tty to override',
             '',
-            'Arguments:',
-            '  output-file Optional output filename (default: stdout)',
+            'OPTIONS:',
+            '  -i                Show image metadata and source file list only (no reconstruction)',
+            '  -M                Skip MD5 checksum verification',
+            '  -S                Skip SHA256 checksum verification',
+            '  -p                Skip permission restoration',
+            '  -o                Skip ownership/group restoration',
+            '  -t                Skip timestamp restoration',
+            '  -a                Skip ACL (Access Control List) restoration',
+            '  -T                Use intermediate temporary file for validation before move',
+            '  -v                Verbose mode: show progress messages and commands executed',
+            f'  -b SIZE           Block size for dd operations in bytes (default: {self.write_chunk_size})',
+            '  -x OPTS           Extra options (comma-separated list):',
+            '                      gnu-dd    - Force GNU dd mode with iflag (requires GNU coreutils)',
+            '                      plain-dd  - Force POSIX dd mode with head/tail for precision',
+            '                      no-dd     - Use only tail/head (most portable, slightly slower)',
+            '                      allow-tty - Allow writing binary data to terminal (not recommended)',
+            '                      overwrite - Overwrite existing output file without prompting',
+            '  -h                Show this help message',
             '',
-            'Examples:',
-            '  $0 -i                          # Show image information',
-            '  $0 output.bin                  # Reconstruct to output.bin',
-            '  $0 > output.bin                # Reconstruct to stdout',
-            '  $0 -M -S output.bin            # Skip checksum verification',
-            '  $0 -x overwrite output.bin     # Overwrite existing file',
-            '  $0 -x no-dd -v output.bin      # Use portable mode with verbose output',
+            'EXAMPLES:',
+            '  $0 -i                              # Display image info without reconstructing',
+            '  $0 output.bin                      # Reconstruct to output.bin with verification',
+            '  $0 > output.bin                    # Reconstruct to stdout (for piping)',
+            '  $0 -M -S output.bin                # Reconstruct without checksum verification',
+            '  $0 -x overwrite output.bin         # Overwrite if output file already exists',
+            '  $0 -v output.bin                   # Verbose output showing all operations',
+            '  $0 -x no-dd -v output.bin          # Portable mode with verbose output',
+            '  $0 -T output.bin                   # Create temp file, validate, then move',
+            '',
+            'MODES:',
+            '  The script supports three data copying modes (auto-detected by default):',
+            '    gnu-dd  : GNU dd with iflag=skip_bytes,count_bytes (fastest, large blocks)',
+            '    plain-dd: POSIX dd with skip/count, using head/tail for byte precision',
+            '    no-dd   : Pure POSIX shell, tail/head only (works everywhere, slower)',
+            '',
+            'RETURN VALUE:',
+            '  0 - Success (or info shown with -i)',
+            '  1 - Error (file mismatch, verification failed, missing files, etc.)',
             'EOF',
             '    exit 1',
             '}',
@@ -1321,20 +1336,46 @@ def read_file_list(input_stream, null_separated: bool):
 
 
 def main():
-    """Main entry point for the image rebuilder."""
+    """Main entry point for the image reconstructer."""
     parser = argparse.ArgumentParser(
-        description='Generate a shell script to rebuild an image file from extracted files',
+        description='Generate a self-extracting shell script to reconstruct an image file from extracted files',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-  # From newline-separated file list
-  find extracted_dir -type f | %(prog)s original.img > rebuild.sh
+DESCRIPTION:
+  Image Reconstructor Generator analyzes a list of extracted files and creates
+  a POSIX shell script that can reconstruct the original image. The script
+  discovers reusable content chunks that exist in both the extracted files and
+  the original image, then generates a portable reconstruction script with
+  optional integrity verification.
 
-  # From null-separated file list (handles special characters)
-  find extracted_dir -type f -print0 | %(prog)s -0 original.img > rebuild.sh
+EXAMPLES:
+  # Generate reconstruction script from extracted files via stdin
+  find extracted_dir -type f | %(prog)s original.img > reconstruct.sh
+  chmod +x reconstruct.sh
+  ./reconstruct.sh output.img
 
-  # From a saved file list
-  %(prog)s original.img -i files.txt > rebuild.sh
+  # With null-separated input (handles special characters in filenames)
+  find extracted_dir -type f -print0 | %(prog)s -0 original.img > reconstruct.sh
+
+  # From a saved file list with verbose output
+  %(prog)s -v original.img -i files.txt > reconstruct.sh 2> progress.log
+
+  # Using direct output file option
+  %(prog)s original.img -i files.txt -o reconstruct.sh
+  chmod +x reconstruct.sh
+
+REUSABLE EXTENT DISCOVERY:
+  The tool identifies "extents" (contiguous blocks of data) that appear in both
+  extracted files and the original image. These extents are reused in the
+  reconstruction script, with the minimum extent size set to avoid including
+  very small matches (default: 1 MiB). Only exact byte-for-byte matches are
+  recognized; compressed or modified content appears as unmatched.
+
+TYPICAL WORKFLOW:
+  1. Extract files from an image: tar xf image.tar
+  2. Generate a reconstruction script: find extracted | %(prog)s image.tar > gen.sh
+  3. Test the script: ./gen.sh -i  (show info), ./gen.sh test.tar (reconstruct)
+  4. Verify: cmp image.tar test.tar
         """
     )
 

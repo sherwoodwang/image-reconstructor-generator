@@ -12,7 +12,7 @@ from io import BytesIO
 # Add parent directory to path to import the module
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from image_rebuilder import ImageProcessor
+from image_reconstructor_generator import ImageProcessor
 
 
 class TestImageProcessor(unittest.TestCase):

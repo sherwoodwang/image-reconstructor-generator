@@ -5,7 +5,7 @@ import tempfile
 import subprocess
 import os
 from pathlib import Path
-from image_rebuilder import ImageInfo, ImageProcessor, OffsetMapper
+from image_reconstructor_generator import ImageInfo, ImageProcessor, OffsetMapper
 
 
 class TestReconstructionScriptGeneration(unittest.TestCase):
