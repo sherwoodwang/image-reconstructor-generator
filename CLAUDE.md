@@ -25,9 +25,21 @@ pip install -e .
 **Run tests before committing or after major changes:**
 
 ```bash
-python3 -m unittest tests.test_image_rebuilder -v
+python3 -m unittest discover -s tests -v
 ```
 
 All tests must pass before committing.
 
 **Note:** Make sure the virtual environment is activated when running tests.
+
+## Type Checking
+
+**Run pyright type checking frequently during development:**
+
+```bash
+pyright image_rebuilder.py
+```
+
+- Run pyright after any non-trivial changes to catch type errors early
+- All code must pass type checking with 0 errors before committing
+- Type checking helps catch potential bugs and improves code quality

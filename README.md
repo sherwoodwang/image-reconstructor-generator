@@ -81,6 +81,16 @@ For quieter output (just pass/fail):
 python3 -m unittest tests.test_image_rebuilder
 ```
 
+### Type Checking
+
+This project uses [pyright](https://github.com/microsoft/pyright) for static type checking. Run type checking before committing:
+
+```bash
+pyright image_rebuilder.py
+```
+
+All code should pass type checking with 0 errors before committing.
+
 ### Test Coverage
 
 The test suite includes:

@@ -9,13 +9,38 @@ rebuild an image file from the extracted files.
 import argparse
 import sys
 from pathlib import Path
+from typing import NamedTuple, Optional
 import mmh3
+import hashlib
+import os
+import pwd
+import grp
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
+
+
+class ImageInfo(NamedTuple):
+    """Information about the image file."""
+    size: int
+    permissions: int
+    uid: int
+    gid: int
+    owner: str
+    group: str
+    atime: float
+    mtime: float
+    ctime: float
+    md5: str
+    sha256: str
+    acl: Optional[str]  # Extended ACL information if available
 
 
 class ImageProcessor:
     """Processes files and generates shell script to rebuild an image."""
 
-    def __init__(self, image_file: Path, output_stream=sys.stdout, block_size: int = 4096, min_extent_size: int = 1048576):
+    def __init__(self, image_file: Path, output_stream=sys.stdout, block_size: int = 4096, min_extent_size: int = 1048576,
+                 capture_ownership: bool = True, capture_acl: bool = True, capture_md5: bool = True, capture_sha256: bool = True):
         """
         Initialize the image processor.
 
@@ -24,14 +49,120 @@ class ImageProcessor:
             output_stream: Stream to write the shell script to
             block_size: Size of blocks in bytes for hashing (default: 4096)
             min_extent_size: Minimum reusable extent size in bytes (default: 1048576, which is 1 MiB)
+            capture_ownership: Whether to capture ownership information for the image file (default: True)
+            capture_acl: Whether to capture ACL information for the image file (default: True)
+            capture_md5: Whether to calculate MD5 hash for the image file (default: True)
+            capture_sha256: Whether to calculate SHA256 hash for the image file (default: True)
         """
         self.image_file = image_file
         self.block_size = block_size
         self.min_extent_size = min_extent_size
         self.min_extent_blocks = min_extent_size // block_size
         self.output_stream = output_stream
-        self.image_hashes = self._generate_image_hashes()
+        self.capture_ownership = capture_ownership
+        self.capture_acl = capture_acl
+        self.capture_md5 = capture_md5
+        self.capture_sha256 = capture_sha256
+        self.image_hashes: list[int] = []
+        self.image_info: ImageInfo
         self.matches = []  # List of (file_path, file_start_byte, file_end_byte, image_start_byte, image_end_byte) tuples
+        self._initialize()
+
+    def _initialize(self):
+        """
+        Initialize the image processor by generating image hashes and gathering image metadata.
+
+        This is called automatically at the end of __init__.
+        """
+        # Gather image file information
+        stat_info = self.image_file.stat()
+
+        # Get owner and group names (if requested)
+        if self.capture_ownership:
+            try:
+                owner = pwd.getpwuid(stat_info.st_uid).pw_name
+            except KeyError:
+                owner = str(stat_info.st_uid)
+
+            try:
+                group = grp.getgrgid(stat_info.st_gid).gr_name
+            except KeyError:
+                group = str(stat_info.st_gid)
+        else:
+            owner = ""
+            group = ""
+
+        # Try to get ACL information (if requested and available)
+        acl_info: Optional[str] = None
+        if self.capture_acl:
+            try:
+                result = subprocess.run(
+                    ['getfacl', '-p', str(self.image_file)],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if result.returncode == 0:
+                    acl_info = result.stdout
+            except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+                # getfacl not available or failed, skip ACL
+                pass
+
+        # Calculate MD5 and SHA256 hashes using parallel threads for better performance
+        # Using hashlib.file_digest() which is optimized and releases the GIL
+        md5_result: list[Optional[str]] = [None]
+        sha256_result: list[Optional[str]] = [None]
+
+        # Determine which hashes to compute
+        compute_hashes = []
+
+        if self.capture_md5 or self.capture_sha256:
+            md5_lock = Lock()
+            sha256_lock = Lock()
+
+            if self.capture_md5:
+                def compute_md5():
+                    with open(self.image_file, 'rb') as f:
+                        digest = hashlib.file_digest(f, 'md5')
+                    with md5_lock:
+                        md5_result[0] = digest.hexdigest()
+                compute_hashes.append(('md5', compute_md5))
+
+            if self.capture_sha256:
+                def compute_sha256():
+                    with open(self.image_file, 'rb') as f:
+                        digest = hashlib.file_digest(f, 'sha256')
+                    with sha256_lock:
+                        sha256_result[0] = digest.hexdigest()
+                compute_hashes.append(('sha256', compute_sha256))
+
+            # Run hash calculations in parallel
+            with ThreadPoolExecutor(max_workers=len(compute_hashes)) as executor:
+                futures = [executor.submit(func) for _, func in compute_hashes]
+                for future in futures:
+                    future.result()
+
+        # Get final hash values (empty string if not computed)
+        md5_hash = md5_result[0] if md5_result[0] is not None else ""
+        sha256_hash = sha256_result[0] if sha256_result[0] is not None else ""
+
+        self.image_info = ImageInfo(
+            size=stat_info.st_size,
+            permissions=stat_info.st_mode,
+            uid=stat_info.st_uid,
+            gid=stat_info.st_gid,
+            owner=owner,
+            group=group,
+            atime=stat_info.st_atime,
+            mtime=stat_info.st_mtime,
+            ctime=stat_info.st_ctime,
+            md5=md5_hash,
+            sha256=sha256_hash,
+            acl=acl_info
+        )
+
+        # Generate block hashes for the image
+        self.image_hashes = self._generate_image_hashes()
 
     def _generate_hashes_for_file(self, file_path):
         """
@@ -262,8 +393,6 @@ class ImageProcessor:
                     # No match found - skip forward by minimum extent size
                     current_block += self.min_extent_blocks
 
-                    # TODO: Handle the unmatched section (will need to be included literally in output)
-
     def finalize(self):
         """
         Finish processing - generate complete shell script to rebuild the image.
@@ -298,36 +427,318 @@ class ImageProcessor:
                 concatenated_offset += 1
 
         # Step 2: Generate the inner shell script that will copy bytes to reconstruct the image
-        # The generated script will have access to variables injected by generate_shell_wrapper:
-        # - script_file: path to the self-extracting script file (set to "$0")
-        # - data_offset: byte offset where embedded image data begins in the script file
-        script_lines = ['set -e', '']
-        script_lines.append('# Helper functions')
-        script_lines.append('copy_from_script() { dd if="$script_file" bs=1 skip=$((data_offset + $1)) count=$2 2>/dev/null; }')
-        script_lines.append('copy_from_file() { dd if="$1" bs=1 skip=$2 count=$3 2>/dev/null; }')
-        script_lines.append('')
-
-        for source, start_offset, end_offset in sequence:
-            size = end_offset - start_offset
-            if size == 0:
-                # Skip zero-size ranges
-                continue
-
-            if source == 'image':
-                # Copy from concatenated data in this script
-                concat_offset = offset_mapping[start_offset]
-                script_lines.append(f'copy_from_script {concat_offset} {size}')
-            else:
-                # Copy from input file (source is the file path)
-                # Use shell quoting to handle file paths with special characters
-                # The file path is used as-is since the script runs in the same directory
-                escaped_path = source.replace("'", "'\"'\"'")  # Escape single quotes for shell
-                script_lines.append(f"copy_from_file '{escaped_path}' {start_offset} {size}")
-
-        script_text = '\n'.join(script_lines) + '\n'
+        script_text = self._generate_reconstruction_script(sequence, offset_mapping, self.image_info)
 
         # Step 3: Generate the self-extracting wrapper script
         generate_shell_wrapper(script_text, image_ranges, self.image_file, self.output_stream)
+
+    def _generate_reconstruction_script(self, sequence, offset_mapping, image_info: ImageInfo) -> str:
+        """Generate the complete reconstruction script with validation and restoration."""
+        script_lines = []
+
+        # Script header with usage and argument parsing
+        script_lines.extend([
+            '# Parse command-line arguments',
+            'show_info=0',
+            'skip_md5=0',
+            'skip_sha256=0',
+            'skip_permissions=0',
+            'skip_ownership=0',
+            'skip_timestamps=0',
+            'skip_acl=0',
+            'use_tempfile=0',
+            'verbose=0',
+            'exit_code=0',
+            '',
+            'usage() {',
+            '    cat >&2 <<EOF',
+            'Usage: $0 [options] [output-file]',
+            '',
+            'Options:',
+            '  -i          Show image information only (do not reconstruct)',
+            '  -M          Skip MD5 verification',
+            '  -S          Skip SHA256 verification',
+            '  -p          Skip permission restoration',
+            '  -o          Skip ownership restoration',
+            '  -t          Skip timestamp restoration',
+            '  -a          Skip ACL restoration',
+            '  -T          Use intermediate temporary file for validation',
+            '  -v          Verbose mode (show progress messages)',
+            '  -h          Show this help message',
+            '',
+            'Arguments:',
+            '  output-file Optional output filename (default: stdout)',
+            'EOF',
+            '    exit 1',
+            '}',
+            '',
+            'while getopts "iMSpotaTvh" opt; do',
+            '    case "$opt" in',
+            '        i) show_info=1 ;;',
+            '        M) skip_md5=1 ;;',
+            '        S) skip_sha256=1 ;;',
+            '        p) skip_permissions=1 ;;',
+            '        o) skip_ownership=1 ;;',
+            '        t) skip_timestamps=1 ;;',
+            '        a) skip_acl=1 ;;',
+            '        T) use_tempfile=1 ;;',
+            '        v) verbose=1 ;;',
+            '        h) usage ;;',
+            '        *) usage ;;',
+            '    esac',
+            'done',
+            'shift $((OPTIND - 1))',
+            '',
+            'output_file=""',
+            'if [ $# -eq 1 ]; then',
+            '    output_file="$1"',
+            'elif [ $# -gt 1 ]; then',
+            '    echo "Error: Too many arguments" >&2',
+            '    usage',
+            'fi',
+            '',
+            '# Show information mode',
+            'if [ "$show_info" -eq 1 ]; then',
+            '    cat <<EOF',
+            'Image Information:',
+            f'  Size:        {image_info.size} bytes',
+            f'  Permissions: {oct(image_info.permissions)[2:]}',
+        ])
+
+        if image_info.owner and image_info.group:
+            script_lines.append(f'  Owner:Group: {image_info.owner}:{image_info.group}')
+        if image_info.uid or image_info.gid:
+            script_lines.append(f'  UID:GID:     {image_info.uid}:{image_info.gid}')
+
+        script_lines.extend([
+            f'  Accessed:    $(date -d @{int(image_info.atime)} 2>/dev/null || echo "N/A")',
+            f'  Modified:    $(date -d @{int(image_info.mtime)} 2>/dev/null || echo "N/A")',
+            f'  Changed:     $(date -d @{int(image_info.ctime)} 2>/dev/null || echo "N/A")',
+        ])
+
+        if image_info.md5:
+            script_lines.append(f'  MD5:         {image_info.md5}')
+        if image_info.sha256:
+            script_lines.append(f'  SHA256:      {image_info.sha256}')
+        if image_info.acl:
+            script_lines.extend([
+                '  ACL:         Available',
+            ])
+
+        script_lines.extend([
+            'EOF',
+            '    exit 0',
+            'fi',
+            '',
+            '# Check if stdout is a terminal when no output file specified',
+            'if [ -z "$output_file" ] && [ -t 1 ]; then',
+            '    echo "Error: Refusing to write binary data to terminal." >&2',
+            '    echo "Use -h for usage information." >&2',
+            '    exit 1',
+            'fi',
+            '',
+            '# Helper functions',
+            'copy_from_script() { dd if="$script_file" bs=1 skip=$((data_offset + $1)) count=$2 2>/dev/null; }',
+            'copy_from_file() { dd if="$1" bs=1 skip=$2 count=$3 2>/dev/null; }',
+            '',
+        ])
+
+        # If output file specified and tempfile requested, redirect to temp file for validation
+        script_lines.extend([
+            '# Setup output',
+            'if [ -n "$output_file" ]; then',
+            '    if [ "$use_tempfile" -eq 1 ]; then',
+            '        temp_file="${output_file}.tmp.$$"',
+            '        [ "$verbose" -eq 1 ] && echo "Using temporary file: $temp_file" >&2',
+            '        exec > "$temp_file"',
+            '    else',
+            '        exec > "$output_file"',
+            '    fi',
+            'fi',
+            '',
+            '# Reconstruct the image',
+            '[ "$verbose" -eq 1 ] && [ -n "$output_file" ] && echo "Reconstructing image..." >&2',
+        ])
+
+        # Add reconstruction commands
+        for source, start_offset, end_offset in sequence:
+            size = end_offset - start_offset
+            if size == 0:
+                continue
+
+            if source == 'image':
+                concat_offset = offset_mapping[start_offset]
+                script_lines.append(f'copy_from_script {concat_offset} {size}')
+            else:
+                escaped_path = source.replace("'", "'\"'\"'")
+                script_lines.append(f"copy_from_file '{escaped_path}' {start_offset} {size}")
+
+        script_lines.append('')
+
+        # Validation and restoration (only if output file specified)
+        script_lines.extend([
+            '# Validate and restore metadata (only if output file specified)',
+            'if [ -n "$output_file" ]; then',
+            '    # Close stdout to finalize the file',
+            '    exec >&-',
+            '',
+            '    # Determine target file for validation',
+            '    if [ "$use_tempfile" -eq 1 ]; then',
+            '        target_file="$temp_file"',
+            '    else',
+            '        target_file="$output_file"',
+            '    fi',
+            '',
+            '    # Validate file size',
+            f'    expected_size={image_info.size}',
+            '    actual_size=$(wc -c < "$target_file")',
+            '    if [ "$actual_size" -ne "$expected_size" ]; then',
+            '        echo "Error: Size mismatch. Expected $expected_size bytes, got $actual_size bytes" >&2',
+            '        exit_code=1',
+            '    fi',
+            '',
+        ])
+
+        # Add MD5 validation if available
+        if image_info.md5:
+            script_lines.extend([
+                '    # Validate MD5 hash',
+                '    if [ "$skip_md5" -eq 0 ]; then',
+                f'        expected_md5="{image_info.md5}"',
+                '        [ "$verbose" -eq 1 ] && echo "Verifying MD5 hash..." >&2',
+                '        if command -v md5sum >/dev/null 2>&1; then',
+                '            actual_md5=$(md5sum "$target_file" | cut -d" " -f1)',
+                '        elif command -v md5 >/dev/null 2>&1; then',
+                '            # macOS md5 command',
+                '            actual_md5=$(md5 -q "$target_file")',
+                '        else',
+                '            echo "Warning: md5sum/md5 not available, skipping MD5 verification" >&2',
+                '            actual_md5=""',
+                '        fi',
+                '        if [ -n "$actual_md5" ]; then',
+                '            if [ "$actual_md5" != "$expected_md5" ]; then',
+                '                echo "Error: MD5 mismatch. Expected $expected_md5, got $actual_md5" >&2',
+                '                exit_code=1',
+                '            else',
+                '                [ "$verbose" -eq 1 ] && echo "MD5 verification passed" >&2',
+                '            fi',
+                '        fi',
+                '    fi',
+                '',
+            ])
+
+        # Add SHA256 validation if available
+        if image_info.sha256:
+            script_lines.extend([
+                '    # Validate SHA256 hash',
+                '    if [ "$skip_sha256" -eq 0 ]; then',
+                f'        expected_sha256="{image_info.sha256}"',
+                '        [ "$verbose" -eq 1 ] && echo "Verifying SHA256 hash..." >&2',
+                '        if command -v sha256sum >/dev/null 2>&1; then',
+                '            actual_sha256=$(sha256sum "$target_file" | cut -d" " -f1)',
+                '        elif command -v shasum >/dev/null 2>&1; then',
+                '            # macOS shasum command',
+                '            actual_sha256=$(shasum -a 256 "$target_file" | cut -d" " -f1)',
+                '        else',
+                '            echo "Warning: sha256sum/shasum not available, skipping SHA256 verification" >&2',
+                '            actual_sha256=""',
+                '        fi',
+                '        if [ -n "$actual_sha256" ]; then',
+                '            if [ "$actual_sha256" != "$expected_sha256" ]; then',
+                '                echo "Error: SHA256 mismatch. Expected $expected_sha256, got $actual_sha256" >&2',
+                '                exit_code=1',
+                '            else',
+                '                [ "$verbose" -eq 1 ] && echo "SHA256 verification passed" >&2',
+                '            fi',
+                '        fi',
+                '    fi',
+                '',
+            ])
+
+        # Move temp file to final location (only if using tempfile)
+        script_lines.extend([
+            '    # Move temp file to final location (only if using tempfile)',
+            '    if [ "$use_tempfile" -eq 1 ]; then',
+            '        if ! mv "$temp_file" "$output_file"; then',
+            '            echo "Error: Failed to move temporary file to $output_file" >&2',
+            '            rm -f "$temp_file"',
+            '            exit 1',
+            '        fi',
+            '    fi',
+            '',
+        ])
+
+        # Restore permissions
+        script_lines.extend([
+            '    # Restore permissions',
+            '    if [ "$skip_permissions" -eq 0 ]; then',
+            f'        if ! chmod {oct(image_info.permissions & 0o777)[2:]} "$output_file" 2>/dev/null; then',
+            '            echo "Error: Failed to restore permissions" >&2',
+            '            exit_code=1',
+            '        fi',
+            '    fi',
+            '',
+        ])
+
+        # Restore ownership if available
+        if image_info.owner and image_info.group:
+            script_lines.extend([
+                '    # Restore ownership',
+                '    if [ "$skip_ownership" -eq 0 ]; then',
+                '        if [ "$(id -u)" -eq 0 ]; then',
+                f'            if ! chown "{image_info.owner}:{image_info.group}" "$output_file" 2>/dev/null; then',
+                '                echo "Error: Failed to restore ownership" >&2',
+                '                exit_code=1',
+                '            fi',
+                '        else',
+                '            echo "Warning: Not running as root, cannot restore ownership" >&2',
+                '        fi',
+                '    fi',
+                '',
+            ])
+
+        # Restore timestamps
+        script_lines.extend([
+            '    # Restore timestamps',
+            '    if [ "$skip_timestamps" -eq 0 ]; then',
+            f'        if ! touch -t "$(date -d @{int(image_info.mtime)} +%Y%m%d%H%M.%S 2>/dev/null)" "$output_file" 2>/dev/null; then',
+            '            echo "Error: Failed to restore timestamps" >&2',
+            '            exit_code=1',
+            '        fi',
+            '    fi',
+            '',
+        ])
+
+        # Restore ACL if available
+        if image_info.acl:
+            escaped_acl = image_info.acl.replace("'", "'\"'\"'")
+            script_lines.extend([
+                '    # Restore ACL',
+                '    if [ "$skip_acl" -eq 0 ]; then',
+                '        if command -v setfacl >/dev/null 2>&1; then',
+                f"            if ! echo '{escaped_acl}' | setfacl --restore=- 2>/dev/null; then",
+                '                echo "Error: Failed to restore ACL" >&2',
+                '                exit_code=1',
+                '            fi',
+                '        else',
+                '            echo "Warning: setfacl not available, skipping ACL restoration" >&2',
+                '        fi',
+                '    fi',
+                '',
+            ])
+
+        script_lines.extend([
+            '    if [ "$exit_code" -eq 0 ]; then',
+            '        [ "$verbose" -eq 1 ] && echo "Successfully reconstructed: $output_file" >&2',
+            '    else',
+            '        echo "Reconstruction completed with errors: $output_file" >&2',
+            '    fi',
+            'fi',
+            '',
+            'exit $exit_code',
+        ])
+
+        return '\n'.join(script_lines) + '\n'
 
 
 def generate_reconstruction_sequence(matches, image_size):
@@ -444,14 +855,14 @@ def generate_shell_wrapper(script_text, attachment_ranges, attachment_file, outp
         attachment_ranges = [(0, 50), (200, 300)]
         generate_shell_wrapper(script_text, attachment_ranges, Path('img.bin'), output_file)
     """
-    # Step 1: Create the complete script with embedded reconstruction script and placeholder
+    # Step 1: Create the complete wrapper script with embedded reconstruction script and placeholder
     # Placeholder will be a 10-digit number that we can replace later
     import textwrap
 
     placeholder = b'data_offset=0000000000'
 
     # Encode each segment separately and concatenate as bytes in a single expression
-    header_bytes = (
+    wrapper_script_bytes = (
         textwrap.dedent('''\
             #!/bin/sh
             set -e
@@ -471,7 +882,7 @@ def generate_shell_wrapper(script_text, attachment_ranges, attachment_file, outp
     )
 
     # Step 2: Calculate actual offset
-    data_offset = len(header_bytes)
+    data_offset = len(wrapper_script_bytes)
 
     # Replace placeholder with actual offset in bytes
     # We need to keep the same byte length, so pad with spaces on the RIGHT
@@ -481,9 +892,9 @@ def generate_shell_wrapper(script_text, attachment_ranges, attachment_file, outp
     # Replace in bytes - only replace the FIRST occurrence to avoid accidentally
     # replacing the same pattern if it appears in the embedded script
     replacement = b'data_offset=' + data_offset_bytes
-    if placeholder not in header_bytes:
-        raise ValueError(f"Placeholder '{placeholder}' not found in header")
-    header_bytes = header_bytes.replace(placeholder, replacement, 1)
+    if placeholder not in wrapper_script_bytes:
+        raise ValueError(f"Placeholder '{placeholder}' not found in wrapper script")
+    wrapper_script_bytes = wrapper_script_bytes.replace(placeholder, replacement, 1)
 
     # Step 4: Output the complete script
     # Get the binary output buffer
@@ -494,8 +905,8 @@ def generate_shell_wrapper(script_text, attachment_ranges, attachment_file, outp
         # Already a binary stream
         output_buffer = output_stream
 
-    # Write header (which contains the embedded script)
-    output_buffer.write(header_bytes)
+    # Write wrapper script (which contains the embedded reconstruction script)
+    output_buffer.write(wrapper_script_bytes)
 
     # Write concatenated attachment data
     with open(attachment_file, 'rb') as attach_f:
@@ -610,6 +1021,30 @@ Examples:
         help='Minimum reusable extent size in bytes (must be a multiple of block size, default: 1048576, which is 1 MiB)'
     )
 
+    parser.add_argument(
+        '--no-ownership',
+        action='store_true',
+        help='Skip capturing ownership information (owner/group) for the image file'
+    )
+
+    parser.add_argument(
+        '--no-acl',
+        action='store_true',
+        help='Skip capturing ACL (Access Control List) information for the image file'
+    )
+
+    parser.add_argument(
+        '--no-md5',
+        action='store_true',
+        help='Skip calculating MD5 hash for the image file'
+    )
+
+    parser.add_argument(
+        '--no-sha256',
+        action='store_true',
+        help='Skip calculating SHA256 hash for the image file'
+    )
+
     args = parser.parse_args()
 
     # Validate min-extent-size is a multiple of block-size
@@ -635,7 +1070,16 @@ Examples:
         )
 
     # Initialize the processor
-    processor = ImageProcessor(args.image, args.output, block_size=args.block_size, min_extent_size=args.min_extent_size)
+    processor = ImageProcessor(
+        args.image,
+        args.output,
+        block_size=args.block_size,
+        min_extent_size=args.min_extent_size,
+        capture_ownership=not args.no_ownership,
+        capture_acl=not args.no_acl,
+        capture_md5=not args.no_md5,
+        capture_sha256=not args.no_sha256
+    )
 
     try:
         # Begin processing
