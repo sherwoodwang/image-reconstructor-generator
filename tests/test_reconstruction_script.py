@@ -118,10 +118,15 @@ class TestReconstructionScriptGeneration(unittest.TestCase):
             script = processor._generate_reconstruction_script(sequence, offset_mapping, image_info)
 
             self.assertIn('Image Information:', script)
-            self.assertIn('2048 bytes', script)
-            self.assertIn('testuser:testgroup', script)
-            self.assertIn('abc123', script)
-            self.assertIn('def456', script)
+            self.assertIn('file_size=2048', script)
+            self.assertIn('$file_size bytes', script)
+            self.assertIn('file_owner="testuser"', script)
+            self.assertIn('file_group="testgroup"', script)
+            self.assertIn('$file_owner:$file_group', script)
+            self.assertIn('file_md5="abc123"', script)
+            self.assertIn('file_sha256="def456"', script)
+            self.assertIn('$file_md5', script)
+            self.assertIn('$file_sha256', script)
             self.assertIn('ACL:', script)
         finally:
             temp_image.unlink()
@@ -291,7 +296,8 @@ class TestReconstructionScriptGeneration(unittest.TestCase):
             script = processor._generate_reconstruction_script(sequence, offset_mapping, image_info)
 
             self.assertIn('Restore permissions', script)
-            self.assertIn('chmod 755', script)
+            self.assertIn('file_perms=', script)
+            self.assertIn('chmod "$file_perms"', script)
         finally:
             temp_image.unlink()
 
@@ -324,7 +330,9 @@ class TestReconstructionScriptGeneration(unittest.TestCase):
             script = processor._generate_reconstruction_script(sequence, offset_mapping, image_info)
 
             self.assertIn('Restore ownership', script)
-            self.assertIn('chown "testuser:testgroup"', script)
+            self.assertIn('file_owner=', script)
+            self.assertIn('file_group=', script)
+            self.assertIn('chown "$file_owner:$file_group"', script)
             self.assertIn('id -u', script)  # Root check
         finally:
             temp_image.unlink()
@@ -529,13 +537,12 @@ class TestReconstructionScriptExecution(unittest.TestCase):
         script_path = None
         try:
             processor = ImageProcessor(temp_image, capture_md5=False, capture_sha256=False, capture_acl=False)
-            processor.begin()
 
             # Generate script to a file
             with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as script_file:
                 script_path = Path(script_file.name)
                 processor.output_stream = script_file
-                processor.finalize()
+                processor.generate_script()
 
             # Make script executable
             script_path.chmod(0o755)
@@ -567,12 +574,11 @@ class TestReconstructionScriptExecution(unittest.TestCase):
         script_path = None
         try:
             processor = ImageProcessor(temp_image, capture_md5=False, capture_sha256=False, capture_acl=False)
-            processor.begin()
 
             with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as script_file:
                 script_path = Path(script_file.name)
                 processor.output_stream = script_file
-                processor.finalize()
+                processor.generate_script()
 
             script_path.chmod(0o755)
 
@@ -610,7 +616,6 @@ class TestReconstructionScriptExecution(unittest.TestCase):
         try:
             processor = ImageProcessor(temp_image, capture_md5=False, capture_sha256=False,
                                       capture_acl=False, capture_ownership=False)
-            processor.begin()
 
             # Process a file that will create a match
             processor.process_file(str(temp_source))
@@ -618,7 +623,7 @@ class TestReconstructionScriptExecution(unittest.TestCase):
             with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as script_file:
                 script_path = Path(script_file.name)
                 processor.output_stream = script_file
-                processor.finalize()
+                processor.generate_script()
 
             script_path.chmod(0o755)
 
@@ -671,7 +676,6 @@ class TestReconstructionScriptExecution(unittest.TestCase):
             processor = ImageProcessor(temp_image, capture_md5=False, capture_sha256=False,
                                       capture_acl=False, capture_ownership=False,
                                       min_extent_size=4096)  # 1 block minimum
-            processor.begin()
 
             # Create and process files with special names containing data from the image
             for i, special_name in enumerate(special_filenames):
@@ -684,7 +688,7 @@ class TestReconstructionScriptExecution(unittest.TestCase):
             with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as script_file:
                 script_path = Path(script_file.name)
                 processor.output_stream = script_file
-                processor.finalize()
+                processor.generate_script()
 
             script_path.chmod(0o755)
 
@@ -755,7 +759,6 @@ class TestReconstructionScriptExecution(unittest.TestCase):
             processor = ImageProcessor(temp_image, capture_md5=True, capture_sha256=True,
                                       capture_acl=False, capture_ownership=False,
                                       min_extent_size=4096)
-            processor.begin()
 
             # Process only the files that have data
             for filename in file_data.keys():
@@ -764,7 +767,7 @@ class TestReconstructionScriptExecution(unittest.TestCase):
             with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as script_file:
                 script_path = Path(script_file.name)
                 processor.output_stream = script_file
-                processor.finalize()
+                processor.generate_script()
 
             script_path.chmod(0o755)
 
@@ -820,12 +823,11 @@ class TestReconstructionScriptExecution(unittest.TestCase):
         script_path = None
         try:
             processor = ImageProcessor(temp_image, capture_md5=False, capture_sha256=False, capture_acl=False)
-            processor.begin()
 
             with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as script_file:
                 script_path = Path(script_file.name)
                 processor.output_stream = script_file
-                processor.finalize()
+                processor.generate_script()
 
             script_path.chmod(0o755)
 
@@ -861,12 +863,11 @@ class TestReconstructionScriptExecution(unittest.TestCase):
         try:
             processor = ImageProcessor(temp_image, capture_md5=False, capture_sha256=False,
                                       capture_acl=False, capture_ownership=False)
-            processor.begin()
 
             with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as script_file:
                 script_path = Path(script_file.name)
                 processor.output_stream = script_file
-                processor.finalize()
+                processor.generate_script()
 
             script_path.chmod(0o755)
 

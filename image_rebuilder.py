@@ -160,7 +160,7 @@ class ImageProcessor:
         self.image_file = image_file
         self.block_size = block_size
         self.min_extent_size = min_extent_size
-        self.min_extent_blocks = min_extent_size // block_size
+        self.min_extent_blocks = max(1, min_extent_size // block_size)
         self.output_stream = output_stream
         self.capture_ownership = capture_ownership
         self.capture_acl = capture_acl
@@ -312,10 +312,6 @@ class ImageProcessor:
         """
         return self._generate_hashes_for_file(self.image_file)
 
-    def begin(self):
-        """Start processing - write shell script header."""
-        # TODO: Implement shell script header generation
-        pass
 
     def _find_extent_in_image(self, file_f, image_f, file_size, image_size,
                               file_hashes, extent_blocks, file_start_block=0):
@@ -525,17 +521,18 @@ class ImageProcessor:
         # Increment file count
         self.file_count += 1
 
-    def finalize(self):
+    def generate_script(self):
         """
-        Finish processing - generate complete shell script to rebuild the image.
+        Generate the complete self-extracting reconstruction shell script.
 
-        This method:
-        1. Calls generate_reconstruction_sequence to get the reconstruction sequence
-        2. Creates a layout of concatenated selected data from the image
-        3. Generates the inner shell script for data copying
-        4. Calls generate_shell_wrapper to create the self-extracting output
+        This method should be called after all files have been processed with process_file().
+        It performs the following steps:
+        1. Generates the reconstruction sequence from all collected matches
+        2. Creates a layout of concatenated data from the image file
+        3. Generates the inner shell script for data copying and validation
+        4. Creates the self-extracting wrapper script with embedded data
         """
-        self._log("Starting finalization - generating reconstruction script")
+        self._log("Generating reconstruction script")
 
         # Get the image size
         image_size = self.image_file.stat().st_size
@@ -578,7 +575,7 @@ class ImageProcessor:
                               progress_callback=progress_callback if self.verbose else None,
                               chunk_size=self.write_chunk_size)
         self._log(f"Processed {self.file_count} files")
-        self._log("Completed finalization")
+        self._log("Script generation complete")
 
     def _generate_reconstruction_script(self, sequence, offset_mapping: OffsetMapper, image_info: ImageInfo) -> str:
         """Generate the complete reconstruction script with validation and restoration."""
@@ -682,44 +679,65 @@ class ImageProcessor:
             'done',
             'shift $((OPTIND - 1))',
             '',
-            'output_file=""',
-            'if [ $# -eq 1 ]; then',
-            '    output_file="$1"',
-            'elif [ $# -gt 1 ]; then',
-            '    echo "Error: Too many arguments" >&2',
-            '    usage',
-            'fi',
-            '',
-            '# Check if output file already exists',
-            'if [ -n "$output_file" ] && [ -e "$output_file" ] && [ "$allow_overwrite" -eq 0 ]; then',
-            '    echo "Error: Output file already exists: $output_file" >&2',
-            '    echo "Use -x overwrite to overwrite existing files." >&2',
-            '    exit 1',
-            'fi',
+            '# Set up metadata variables upfront',
+            f'file_perms="{oct(image_info.permissions & 0o777)[2:]}"',
+            f'file_mtime="{int(image_info.mtime)}"',
+        ])
+
+        if image_info.owner and image_info.group:
+            script_lines.extend([
+                f'file_owner="{image_info.owner}"',
+                f'file_group="{image_info.group}"',
+            ])
+
+        if image_info.acl:
+            escaped_acl = escape_for_shell_display(image_info.acl)
+            script_lines.extend([
+                f"file_acl={escaped_acl}",
+            ])
+
+        # Set up additional metadata variables for info display
+        script_lines.extend([
+            f'file_size={image_info.size}',
+            f'file_atime={int(image_info.atime)}',
+            f'file_ctime={int(image_info.ctime)}',
+        ])
+
+        if image_info.md5:
+            script_lines.append(f'file_md5="{image_info.md5}"')
+        if image_info.sha256:
+            script_lines.append(f'file_sha256="{image_info.sha256}"')
+        if image_info.uid or image_info.gid:
+            script_lines.extend([
+                f'file_uid={image_info.uid}',
+                f'file_gid={image_info.gid}',
+            ])
+
+        script_lines.extend([
             '',
             '# Show information mode',
             'if [ "$show_info" -eq 1 ]; then',
             '    cat <<EOF',
             'Image Information:',
-            f'  Size:        {image_info.size} bytes',
-            f'  Permissions: {oct(image_info.permissions)[2:]}',
+            '  Size:        $file_size bytes',
+            '  Permissions: $file_perms',
         ])
 
         if image_info.owner and image_info.group:
-            script_lines.append(f'  Owner:Group: {image_info.owner}:{image_info.group}')
+            script_lines.append('  Owner:Group: $file_owner:$file_group')
         if image_info.uid or image_info.gid:
-            script_lines.append(f'  UID:GID:     {image_info.uid}:{image_info.gid}')
+            script_lines.append('  UID:GID:     $file_uid:$file_gid')
 
         script_lines.extend([
-            f'  Accessed:    @{int(image_info.atime)}',
-            f'  Modified:    @{int(image_info.mtime)}',
-            f'  Changed:     @{int(image_info.ctime)}',
+            '  Accessed:    @$file_atime',
+            '  Modified:    @$file_mtime',
+            '  Changed:     @$file_ctime',
         ])
 
         if image_info.md5:
-            script_lines.append(f'  MD5:         {image_info.md5}')
+            script_lines.append('  MD5:         $file_md5')
         if image_info.sha256:
-            script_lines.append(f'  SHA256:      {image_info.sha256}')
+            script_lines.append('  SHA256:      $file_sha256')
         if image_info.acl:
             script_lines.append('  ACL:         Available')
 
@@ -741,6 +759,21 @@ class ImageProcessor:
 
         script_lines.extend([
             '    exit 0',
+            'fi',
+            '',
+            'output_file=""',
+            'if [ $# -eq 1 ]; then',
+            '    output_file="$1"',
+            'elif [ $# -gt 1 ]; then',
+            '    echo "Error: Too many arguments" >&2',
+            '    usage',
+            'fi',
+            '',
+            '# Check if output file already exists',
+            'if [ -n "$output_file" ] && [ -e "$output_file" ] && [ "$allow_overwrite" -eq 0 ]; then',
+            '    echo "Error: Output file already exists: $output_file" >&2',
+            '    echo "Use -x overwrite to overwrite existing files." >&2',
+            '    exit 1',
             'fi',
             '',
             '# Check if stdout is a terminal when no output file specified',
@@ -902,7 +935,6 @@ class ImageProcessor:
             script_lines.extend([
                 '    # Validate MD5 hash',
                 '    if [ "$skip_md5" -eq 0 ]; then',
-                f'        expected_md5="{image_info.md5}"',
                 '        [ "$verbose" -eq 1 ] && echo "Verifying MD5 hash..." >&2',
                 '        if command -v md5sum >/dev/null 2>&1; then',
                 '            actual_md5=$(md5sum "$target_file" | cut -d" " -f1)',
@@ -914,8 +946,8 @@ class ImageProcessor:
                 '            actual_md5=""',
                 '        fi',
                 '        if [ -n "$actual_md5" ]; then',
-                '            if [ "$actual_md5" != "$expected_md5" ]; then',
-                '                echo "Error: MD5 mismatch. Expected $expected_md5, got $actual_md5" >&2',
+                '            if [ "$actual_md5" != "$file_md5" ]; then',
+                '                echo "Error: MD5 mismatch. Expected $file_md5, got $actual_md5" >&2',
                 '                exit_code=1',
                 '            else',
                 '                [ "$verbose" -eq 1 ] && echo "MD5 verification passed" >&2',
@@ -930,7 +962,6 @@ class ImageProcessor:
             script_lines.extend([
                 '    # Validate SHA256 hash',
                 '    if [ "$skip_sha256" -eq 0 ]; then',
-                f'        expected_sha256="{image_info.sha256}"',
                 '        [ "$verbose" -eq 1 ] && echo "Verifying SHA256 hash..." >&2',
                 '        if command -v sha256sum >/dev/null 2>&1; then',
                 '            actual_sha256=$(sha256sum "$target_file" | cut -d" " -f1)',
@@ -942,8 +973,8 @@ class ImageProcessor:
                 '            actual_sha256=""',
                 '        fi',
                 '        if [ -n "$actual_sha256" ]; then',
-                '            if [ "$actual_sha256" != "$expected_sha256" ]; then',
-                '                echo "Error: SHA256 mismatch. Expected $expected_sha256, got $actual_sha256" >&2',
+                '            if [ "$actual_sha256" != "$file_sha256" ]; then',
+                '                echo "Error: SHA256 mismatch. Expected $file_sha256, got $actual_sha256" >&2',
                 '                exit_code=1',
                 '            else',
                 '                [ "$verbose" -eq 1 ] && echo "SHA256 verification passed" >&2',
@@ -957,6 +988,7 @@ class ImageProcessor:
         script_lines.extend([
             '    # Move temp file to final location (only if using tempfile)',
             '    if [ "$use_tempfile" -eq 1 ]; then',
+            '        [ "$verbose" -eq 1 ] && echo "mv \"$temp_file\" \"$output_file\"" >&2',
             '        if ! mv "$temp_file" "$output_file"; then',
             '            echo "Error: Failed to move temporary file to $output_file" >&2',
             '            rm -f "$temp_file"',
@@ -970,7 +1002,8 @@ class ImageProcessor:
         script_lines.extend([
             '    # Restore permissions',
             '    if [ "$skip_permissions" -eq 0 ]; then',
-            f'        if ! chmod {oct(image_info.permissions & 0o777)[2:]} "$output_file" 2>/dev/null; then',
+            '        [ "$verbose" -eq 1 ] && echo "chmod $file_perms \"$output_file\"" >&2',
+            '        if ! chmod "$file_perms" "$output_file" 2>/dev/null; then',
             '            echo "Error: Failed to restore permissions" >&2',
             '            exit_code=1',
             '        fi',
@@ -984,7 +1017,8 @@ class ImageProcessor:
                 '    # Restore ownership',
                 '    if [ "$skip_ownership" -eq 0 ]; then',
                 '        if [ "$(id -u)" -eq 0 ]; then',
-                f'            if ! chown "{image_info.owner}:{image_info.group}" "$output_file" 2>/dev/null; then',
+                '            [ "$verbose" -eq 1 ] && echo "chown $file_owner:$file_group \"$output_file\"" >&2',
+                '            if ! chown "$file_owner:$file_group" "$output_file" 2>/dev/null; then',
                 '                echo "Error: Failed to restore ownership" >&2',
                 '                exit_code=1',
                 '            fi',
@@ -999,15 +1033,21 @@ class ImageProcessor:
         script_lines.extend([
             '    # Restore timestamps',
             '    if [ "$skip_timestamps" -eq 0 ]; then',
-            f'        # Try GNU touch -d format first (most portable modern approach)',
-            f'        if touch -d "@{int(image_info.mtime)}" "$output_file" 2>/dev/null; then',
+            '        [ "$verbose" -eq 1 ] && echo "touch -d \"@$file_mtime\" \"$output_file\"" >&2',
+            '        # Try GNU touch -d format first (most portable modern approach)',
+            '        if touch -d "@$file_mtime" "$output_file" 2>/dev/null; then',
             '            : # Success with GNU -d format',
             '        else',
             '            # Fallback: try to use BSD-style touch with date conversion',
-            f'            # On BSD systems, touch -t requires YYYYMMDDHHMM.SS format',
-            f'            mtime_formatted=$(date -u -r {int(image_info.mtime)} +"%Y%m%d%H%M.%S" 2>/dev/null)',
+            '            # On BSD systems, touch -t requires YYYYMMDDHHMM.SS format',
+            '            # Note: date -r uses local time, not UTC, so we don\'t use -u flag',
+            '            mtime_formatted=$(date -r "$file_mtime" +"%Y%m%d%H%M.%S" 2>/dev/null)',
             '            if [ -n "$mtime_formatted" ]; then',
-            '                touch -t "$mtime_formatted" "$output_file" 2>/dev/null || true',
+            '                [ "$verbose" -eq 1 ] && echo "touch -t \"$mtime_formatted\" \"$output_file\"" >&2',
+            '                if ! touch -t "$mtime_formatted" "$output_file" 2>/dev/null; then',
+            '                    echo "Error: Failed to restore timestamps with BSD touch" >&2',
+            '                    exit_code=1',
+            '                fi',
             '            else',
             '                echo "Warning: Unable to restore timestamps (date conversion failed)" >&2',
             '            fi',
@@ -1018,12 +1058,12 @@ class ImageProcessor:
 
         # Restore ACL if available
         if image_info.acl:
-            escaped_acl = image_info.acl.replace("'", "'\"'\"'")
             script_lines.extend([
                 '    # Restore ACL',
                 '    if [ "$skip_acl" -eq 0 ]; then',
                 '        if command -v setfacl >/dev/null 2>&1; then',
-                f"            if ! echo '{escaped_acl}' | setfacl --restore=- 2>/dev/null; then",
+                '            [ "$verbose" -eq 1 ] && echo "setfacl --restore=- \"$output_file\"" >&2',
+                '            if ! echo "$file_acl" | setfacl --restore=- 2>/dev/null; then',
                 '                echo "Error: Failed to restore ACL" >&2',
                 '                exit_code=1',
                 '            fi',
@@ -1425,15 +1465,12 @@ Examples:
     )
 
     try:
-        # Begin processing
-        processor.begin()
-
         # Process each file in the input list
         for file_path in read_file_list(args.input, args.null):
             processor.process_file(file_path)
 
-        # Finalize the script
-        processor.finalize()
+        # Generate the reconstruction script
+        processor.generate_script()
 
     except KeyboardInterrupt:
         print("\nInterrupted by user", file=sys.stderr)
@@ -1446,6 +1483,8 @@ Examples:
             args.input.close()
         if args.output != sys.stdout:
             args.output.close()
+            # Make the output script executable
+            os.chmod(args.output.name, 0o755)
 
 
 if __name__ == '__main__':

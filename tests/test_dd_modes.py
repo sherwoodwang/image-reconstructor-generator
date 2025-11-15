@@ -56,9 +56,8 @@ class TestDDModes(unittest.TestCase):
                     block_size=512,
                     min_extent_size=10000000  # Huge min size to skip matching
                 )
-                processor.begin()
                 processor.process_file(str(source_file))
-                processor.finalize()
+                processor.generate_script()
 
             # Make script executable
             script_file.chmod(0o755)
@@ -109,9 +108,8 @@ class TestDDModes(unittest.TestCase):
                     block_size=512,
                     min_extent_size=10000000  # Huge min size to skip matching
                 )
-                processor.begin()
                 processor.process_file(str(source_file))
-                processor.finalize()
+                processor.generate_script()
 
             # Make script executable
             script_file.chmod(0o755)
@@ -151,8 +149,7 @@ class TestDDModes(unittest.TestCase):
                 block_size=4096,
                 min_extent_size=512
             )
-            processor.begin()
-            processor.finalize()
+            processor.generate_script()
 
         # Make script executable
         script_file.chmod(0o755)
@@ -200,8 +197,7 @@ class TestDDModes(unittest.TestCase):
         script_file = self.test_dir_path / "rebuild.sh"
         with open(script_file, 'wb') as f:
             processor = ImageProcessor(image_file, f)
-            processor.begin()
-            processor.finalize()
+            processor.generate_script()
 
         # Make script executable
         script_file.chmod(0o755)
@@ -244,9 +240,8 @@ class TestDDModes(unittest.TestCase):
                     block_size=512,
                     min_extent_size=10000000  # Huge min size to skip matching
                 )
-                processor.begin()
                 processor.process_file(str(source_file))
-                processor.finalize()
+                processor.generate_script()
 
             # Make script executable
             script_file.chmod(0o755)

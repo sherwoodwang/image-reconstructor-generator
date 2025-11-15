@@ -39,12 +39,6 @@ class TestImageProcessor(unittest.TestCase):
         self.assertEqual(processor.image_file, self.image_file)
         self.assertEqual(processor.output_stream, self.output)
 
-    def test_begin_callable(self):
-        """Test that begin() method is callable."""
-        processor = ImageProcessor(self.image_file, self.output)
-
-        # Should not raise an error
-        processor.begin()
 
     def test_process_file_callable(self):
         """Test that process_file() method is callable."""
@@ -270,12 +264,12 @@ class TestImageProcessor(unittest.TestCase):
         finally:
             os.chdir(self.original_cwd)
 
-    def test_finalize_callable(self):
-        """Test that finalize() method is callable."""
+    def test_generate_script_callable(self):
+        """Test that generate_script() method is callable."""
         processor = ImageProcessor(self.image_file, self.output)
 
         # Should not raise an error
-        processor.finalize()
+        processor.generate_script()
 
 
 if __name__ == '__main__':
