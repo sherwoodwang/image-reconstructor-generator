@@ -5,7 +5,7 @@ import tempfile
 import subprocess
 import os
 from pathlib import Path
-from image_rebuilder import ImageInfo, ImageProcessor
+from image_rebuilder import ImageInfo, ImageProcessor, OffsetMapper
 
 
 class TestReconstructionScriptGeneration(unittest.TestCase):
@@ -37,7 +37,7 @@ class TestReconstructionScriptGeneration(unittest.TestCase):
         try:
             processor = ImageProcessor(temp_image)
             sequence = [('image', 0, 1024)]
-            offset_mapping = {i: i for i in range(1024)}
+            offset_mapping = OffsetMapper([(0, 1024)])
 
             script = processor._generate_reconstruction_script(sequence, offset_mapping, image_info)
 
@@ -75,7 +75,7 @@ class TestReconstructionScriptGeneration(unittest.TestCase):
         try:
             processor = ImageProcessor(temp_image)
             sequence = [('image', 0, 100)]
-            offset_mapping = {i: i for i in range(100)}
+            offset_mapping = OffsetMapper([(0, 100)])
 
             script = processor._generate_reconstruction_script(sequence, offset_mapping, image_info)
 
@@ -113,7 +113,7 @@ class TestReconstructionScriptGeneration(unittest.TestCase):
         try:
             processor = ImageProcessor(temp_image)
             sequence = [('image', 0, 2048)]
-            offset_mapping = {i: i for i in range(2048)}
+            offset_mapping = OffsetMapper([(0, 2048)])
 
             script = processor._generate_reconstruction_script(sequence, offset_mapping, image_info)
 
@@ -150,7 +150,7 @@ class TestReconstructionScriptGeneration(unittest.TestCase):
         try:
             processor = ImageProcessor(temp_image)
             sequence = [('image', 0, 512)]
-            offset_mapping = {i: i for i in range(512)}
+            offset_mapping = OffsetMapper([(0, 512)])
 
             script = processor._generate_reconstruction_script(sequence, offset_mapping, image_info)
 
@@ -183,7 +183,7 @@ class TestReconstructionScriptGeneration(unittest.TestCase):
         try:
             processor = ImageProcessor(temp_image)
             sequence = [('image', 0, 256)]
-            offset_mapping = {i: i for i in range(256)}
+            offset_mapping = OffsetMapper([(0, 256)])
 
             script = processor._generate_reconstruction_script(sequence, offset_mapping, image_info)
 
@@ -218,7 +218,7 @@ class TestReconstructionScriptGeneration(unittest.TestCase):
         try:
             processor = ImageProcessor(temp_image)
             sequence = [('image', 0, 256)]
-            offset_mapping = {i: i for i in range(256)}
+            offset_mapping = OffsetMapper([(0, 256)])
 
             script = processor._generate_reconstruction_script(sequence, offset_mapping, image_info)
 
@@ -253,7 +253,7 @@ class TestReconstructionScriptGeneration(unittest.TestCase):
         try:
             processor = ImageProcessor(temp_image)
             sequence = [('image', 0, 128)]
-            offset_mapping = {i: i for i in range(128)}
+            offset_mapping = OffsetMapper([(0, 128)])
 
             script = processor._generate_reconstruction_script(sequence, offset_mapping, image_info)
 
@@ -286,7 +286,7 @@ class TestReconstructionScriptGeneration(unittest.TestCase):
         try:
             processor = ImageProcessor(temp_image)
             sequence = [('image', 0, 256)]
-            offset_mapping = {i: i for i in range(256)}
+            offset_mapping = OffsetMapper([(0, 256)])
 
             script = processor._generate_reconstruction_script(sequence, offset_mapping, image_info)
 
@@ -319,7 +319,7 @@ class TestReconstructionScriptGeneration(unittest.TestCase):
         try:
             processor = ImageProcessor(temp_image)
             sequence = [('image', 0, 256)]
-            offset_mapping = {i: i for i in range(256)}
+            offset_mapping = OffsetMapper([(0, 256)])
 
             script = processor._generate_reconstruction_script(sequence, offset_mapping, image_info)
 
@@ -353,7 +353,7 @@ class TestReconstructionScriptGeneration(unittest.TestCase):
         try:
             processor = ImageProcessor(temp_image)
             sequence = [('image', 0, 256)]
-            offset_mapping = {i: i for i in range(256)}
+            offset_mapping = OffsetMapper([(0, 256)])
 
             script = processor._generate_reconstruction_script(sequence, offset_mapping, image_info)
 
@@ -386,7 +386,7 @@ class TestReconstructionScriptGeneration(unittest.TestCase):
         try:
             processor = ImageProcessor(temp_image)
             sequence = [('image', 0, 256)]
-            offset_mapping = {i: i for i in range(256)}
+            offset_mapping = OffsetMapper([(0, 256)])
 
             script = processor._generate_reconstruction_script(sequence, offset_mapping, image_info)
 
@@ -419,7 +419,7 @@ class TestReconstructionScriptGeneration(unittest.TestCase):
         try:
             processor = ImageProcessor(temp_image)
             sequence = [('image', 0, 256)]
-            offset_mapping = {i: i for i in range(256)}
+            offset_mapping = OffsetMapper([(0, 256)])
 
             script = processor._generate_reconstruction_script(sequence, offset_mapping, image_info)
 
@@ -456,7 +456,7 @@ class TestReconstructionScriptGeneration(unittest.TestCase):
         try:
             processor = ImageProcessor(temp_image)
             sequence = [('image', 0, 256)]
-            offset_mapping = {i: i for i in range(256)}
+            offset_mapping = OffsetMapper([(0, 256)])
 
             script = processor._generate_reconstruction_script(sequence, offset_mapping, image_info)
 
@@ -490,14 +490,26 @@ class TestReconstructionScriptGeneration(unittest.TestCase):
 
         try:
             processor = ImageProcessor(temp_image)
-            # Include a file path with quotes in the sequence
-            sequence = [("file'with'quotes.bin", 0, 128), ('image', 0, 128)]
-            offset_mapping = {i: i for i in range(128)}
 
-            script = processor._generate_reconstruction_script(sequence, offset_mapping, image_info)
+            # Test various special characters
+            test_cases = [
+                ("file'with'quotes.bin", "file'\"'\"'with'\"'\"'quotes.bin"),
+                ("file with spaces.bin", "'file with spaces.bin'"),
+                ("file\twith\ttab.bin", "'file\twith\ttab.bin'"),  # Literal tab preserved
+                ("file\\with\\backslash.bin", "'file\\with\\backslash.bin'"),  # Literal backslash
+                ("café.bin", "'café.bin'"),  # Unicode
+            ]
 
-            # Check that quotes are escaped
-            self.assertIn("file'\"'\"'with'\"'\"'quotes.bin", script)
+            for original_path, expected_escaped in test_cases:
+                with self.subTest(path=original_path):
+                    sequence = [(original_path, 0, 128), ('image', 0, 128)]
+                    offset_mapping = OffsetMapper([(0, 128)])
+
+                    script = processor._generate_reconstruction_script(sequence, offset_mapping, image_info)
+
+                    # Check that the file path appears with proper escaping in copy_from_file command
+                    self.assertIn(expected_escaped, script,
+                                f"Expected {expected_escaped} not found in script for {original_path}")
         finally:
             temp_image.unlink()
 
@@ -630,6 +642,169 @@ class TestReconstructionScriptExecution(unittest.TestCase):
                 temp_source.unlink()
             if script_path and script_path.exists():
                 script_path.unlink()
+
+    def test_script_info_with_special_filenames(self):
+        """Test that script info mode correctly displays filenames with special characters."""
+        # Test various special characters that could appear in filenames
+        special_filenames = [
+            "file'with'quotes.txt",
+            "file with spaces.txt",
+            "file\twith\ttab.txt",
+            "file\nwith\nnewline.txt",
+            "file\\with\\backslash.txt",
+            "café_unicode.txt",
+            "emoji😀.txt",
+        ]
+
+        # Create image with data that will be found in source files
+        test_data = b'A' * 5000 + b'B' * 5000
+
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            f.write(test_data)
+            temp_image = Path(f.name)
+
+        temp_files = []
+        script_path = None
+
+        try:
+            # Use small min_extent_size so our test files will be matched
+            processor = ImageProcessor(temp_image, capture_md5=False, capture_sha256=False,
+                                      capture_acl=False, capture_ownership=False,
+                                      min_extent_size=4096)  # 1 block minimum
+            processor.begin()
+
+            # Create and process files with special names containing data from the image
+            for i, special_name in enumerate(special_filenames):
+                temp_file = Path(special_name)
+                # Write data that matches part of the image (at least 1 block = 4096 bytes)
+                temp_file.write_bytes(b'B' * 5000)
+                temp_files.append(temp_file)
+                processor.process_file(str(temp_file))
+
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as script_file:
+                script_path = Path(script_file.name)
+                processor.output_stream = script_file
+                processor.finalize()
+
+            script_path.chmod(0o755)
+
+            # Run with -i flag
+            result = subprocess.run(
+                [str(script_path), '-i'],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+
+            # Script should execute successfully even with special filenames
+            self.assertEqual(result.returncode, 0, f"Script failed with: {result.stderr}")
+            self.assertIn('Source Files:', result.stdout)
+
+            # The script should either show source files or indicate no external files
+            # The key is that it runs successfully without shell injection or errors
+            # due to special characters in filenames
+            self.assertTrue(
+                'no external files' in result.stdout or
+                any(name.split('\n')[0] in result.stdout for name in special_filenames),
+                "Expected either source files or 'no external files' message"
+            )
+
+        finally:
+            temp_image.unlink()
+            for temp_file in temp_files:
+                if temp_file.exists():
+                    temp_file.unlink()
+            if script_path and script_path.exists():
+                script_path.unlink()
+
+    def test_script_reconstruction_with_special_filenames(self):
+        """Test that script can successfully reconstruct image using files with special characters."""
+        # Test filenames with various special characters that can actually exist on filesystems
+        # Note: Newlines cannot be in filenames, tabs work on Linux but not all systems
+        special_filenames = [
+            "file'with'quotes.txt",
+            "file with spaces.txt",
+            "file$with$dollar.txt",
+        ]
+
+        # Create simple test where one file contains the entire image data
+        # This avoids complexity of hash matching and extent merging
+        image_data = b'TEST_RECONSTRUCTION_DATA' * 500  # 12000 bytes
+
+        # The first file will contain all the image data
+        file_data = {
+            special_filenames[0]: image_data,
+        }
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.bin') as f:
+            f.write(image_data)
+            temp_image = Path(f.name)
+
+        temp_files = []
+        script_path = None
+        output_file = None
+
+        try:
+            # Create all source files with special names
+            for filename, data in file_data.items():
+                temp_file = Path(filename)
+                temp_file.write_bytes(data)
+                temp_files.append(temp_file)
+
+            # Generate reconstruction script
+            processor = ImageProcessor(temp_image, capture_md5=True, capture_sha256=True,
+                                      capture_acl=False, capture_ownership=False,
+                                      min_extent_size=4096)
+            processor.begin()
+
+            # Process only the files that have data
+            for filename in file_data.keys():
+                processor.process_file(filename)
+
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as script_file:
+                script_path = Path(script_file.name)
+                processor.output_stream = script_file
+                processor.finalize()
+
+            script_path.chmod(0o755)
+
+            # Create output file for reconstruction
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.reconstructed') as out:
+                output_file = Path(out.name)
+
+            # Run the reconstruction script
+            result = subprocess.run(
+                [str(script_path), str(output_file)],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+
+            # Verify reconstruction succeeded
+            self.assertEqual(result.returncode, 0,
+                           f"Reconstruction failed: {result.stderr}")
+
+            # Verify the reconstructed file matches the original
+            reconstructed_data = output_file.read_bytes()
+            self.assertEqual(reconstructed_data, image_data,
+                           "Reconstructed data does not match original")
+
+            # Verify the special filename with quotes was used in copy_from_file command
+            script_content = script_path.read_text()
+            # Check that copy_from_file is in the script and properly escaped
+            self.assertIn('copy_from_file', script_content)
+            # Check that the filename with quotes is properly escaped
+            self.assertIn("file'\"'\"'with'\"'\"'quotes.txt", script_content)
+
+        finally:
+            temp_image.unlink()
+            for temp_file in temp_files:
+                if temp_file.exists():
+                    temp_file.unlink()
+            if script_path and script_path.exists():
+                script_path.unlink()
+            if output_file and output_file.exists():
+                output_file.unlink()
 
     def test_script_refuses_binary_to_terminal(self):
         """Test that script refuses to write binary data to terminal."""

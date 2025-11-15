@@ -132,7 +132,7 @@ class TestMainFunction(unittest.TestCase):
 
     @patch('image_rebuilder.ImageProcessor')
     def test_main_counts_files(self, mock_processor_class):
-        """Test that main() prints correct file count."""
+        """Test that main() counts files correctly (file count is tracked in processor)."""
         mock_processor = MagicMock()
         mock_processor_class.return_value = mock_processor
 
@@ -140,14 +140,14 @@ class TestMainFunction(unittest.TestCase):
 
         with patch('sys.argv', ['image_rebuilder.py', str(self.image_file)]):
             with patch('sys.stdin', StringIO(test_input)):
-                stderr_capture = StringIO()
-                with patch('sys.stderr', stderr_capture):
-                    with patch('sys.stdout') as mock_stdout:
-                        mock_stdout.isatty.return_value = False
-                        main()
+                with patch('sys.stdout') as mock_stdout:
+                    mock_stdout.isatty.return_value = False
+                    main()
 
-        stderr_output = stderr_capture.getvalue()
-        self.assertIn("Processed 3 files", stderr_output)
+        # Verify processor methods were called for each file
+        mock_processor.begin.assert_called_once()
+        self.assertEqual(mock_processor.process_file.call_count, 3)
+        mock_processor.finalize.assert_called_once()
 
     @patch('image_rebuilder.ImageProcessor')
     def test_main_empty_input(self, mock_processor_class):
@@ -159,19 +159,14 @@ class TestMainFunction(unittest.TestCase):
 
         with patch('sys.argv', ['image_rebuilder.py', str(self.image_file)]):
             with patch('sys.stdin', StringIO(test_input)):
-                stderr_capture = StringIO()
-                with patch('sys.stderr', stderr_capture):
-                    with patch('sys.stdout') as mock_stdout:
-                        mock_stdout.isatty.return_value = False
-                        main()
+                with patch('sys.stdout') as mock_stdout:
+                    mock_stdout.isatty.return_value = False
+                    main()
 
         # Verify processor methods were called
         mock_processor.begin.assert_called_once()
         self.assertEqual(mock_processor.process_file.call_count, 0)
         mock_processor.finalize.assert_called_once()
-
-        stderr_output = stderr_capture.getvalue()
-        self.assertIn("Processed 0 files", stderr_output)
 
     def test_block_size_argument_in_main(self):
         """Test that block size argument is properly passed from main()."""

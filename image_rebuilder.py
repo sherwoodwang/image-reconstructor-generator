@@ -19,6 +19,105 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 from datetime import datetime
+import bisect
+
+
+def escape_for_shell_display(path: str) -> str:
+    """
+    Escape a file path for safe display in POSIX shell scripts.
+
+    Uses single quotes ('xxx') for all content. Single quotes preserve everything
+    literally including newlines, tabs, backslashes, and other special characters.
+    The only character that needs escaping is the single quote itself, which is
+    escaped as '"'"' (end quote, escaped quote, start quote).
+
+    This function ensures that the escaped string, when evaluated by a POSIX
+    shell, will produce exactly the original path string.
+
+    Args:
+        path: The file path string to escape
+
+    Returns:
+        A shell-escaped string
+
+    Examples:
+        >>> escape_for_shell_display("simple.txt")
+        "'simple.txt'"
+        >>> escape_for_shell_display("file with spaces.txt")
+        "'file with spaces.txt'"
+        >>> escape_for_shell_display("file'with'quotes.txt")
+        "'file'\"'\"'with'\"'\"'quotes.txt'"
+        >>> escape_for_shell_display("file\\nwith\\nbackslash")
+        "'file\\nwith\\nbackslash'"
+    """
+    if not path:
+        return "''"
+
+    # Single quotes preserve everything literally, including newlines, tabs,
+    # backslashes, and all other special characters. The only character that
+    # needs escaping is the single quote itself.
+    if "'" in path:
+        # Replace ' with '"'"' (end quote, escaped quote, start quote)
+        escaped = path.replace("'", "'\"'\"'")
+        return f"'{escaped}'"
+    else:
+        # No single quotes, just wrap in single quotes
+        return f"'{path}'"
+
+
+class OffsetMapper:
+    """Maps image offsets to concatenated data offsets using binary search.
+
+    This avoids creating a massive dictionary for large files by preprocessing
+    the image ranges into a compact representation that supports O(log n) lookups.
+    """
+
+    def __init__(self, image_ranges: list[tuple[int, int]]):
+        """Initialize the mapper with a list of (start_offset, end_offset) tuples.
+
+        Args:
+            image_ranges: List of (image_start, image_end) tuples representing
+                         contiguous ranges from the image file.
+        """
+        # Store the ranges and compute cumulative offsets
+        # Each entry: (image_start, image_end, concat_start)
+        self.segments: list[tuple[int, int, int]] = []
+        concatenated_offset = 0
+
+        for start_offset, end_offset in image_ranges:
+            segment_size = end_offset - start_offset
+            self.segments.append((start_offset, end_offset, concatenated_offset))
+            concatenated_offset += segment_size
+
+        # Extract start offsets for binary search
+        self.start_offsets = [seg[0] for seg in self.segments]
+
+    def map_offset(self, image_offset: int) -> int:
+        """Map an image offset to its corresponding concatenated data offset.
+
+        Args:
+            image_offset: Offset in the original image file
+
+        Returns:
+            Corresponding offset in the concatenated data
+
+        Raises:
+            ValueError: If the image_offset is not within any mapped range
+        """
+        # Binary search to find the segment containing this offset
+        idx = bisect.bisect_right(self.start_offsets, image_offset) - 1
+
+        if idx < 0 or idx >= len(self.segments):
+            raise ValueError(f"Image offset {image_offset} not found in any mapped range")
+
+        image_start, image_end, concat_start = self.segments[idx]
+
+        # Verify the offset is within this segment
+        if image_offset < image_start or image_offset >= image_end:
+            raise ValueError(f"Image offset {image_offset} not found in any mapped range")
+
+        # Calculate the concatenated offset
+        return concat_start + (image_offset - image_start)
 
 
 class ImageInfo(NamedTuple):
@@ -42,7 +141,7 @@ class ImageProcessor:
 
     def __init__(self, image_file: Path, output_stream=sys.stdout, block_size: int = 4096, min_extent_size: int = 1048576,
                  capture_ownership: bool = True, capture_acl: bool = True, capture_md5: bool = True, capture_sha256: bool = True,
-                 verbose: bool = False):
+                 verbose: bool = False, write_chunk_size: int = 16*1024*1024):
         """
         Initialize the image processor.
 
@@ -56,6 +155,7 @@ class ImageProcessor:
             capture_md5: Whether to calculate MD5 hash for the image file (default: True)
             capture_sha256: Whether to calculate SHA256 hash for the image file (default: True)
             verbose: Whether to print timestamped progress messages to stderr (default: False)
+            write_chunk_size: Size of chunks in bytes for writing attachment data (default: 16 MiB)
         """
         self.image_file = image_file
         self.block_size = block_size
@@ -67,9 +167,11 @@ class ImageProcessor:
         self.capture_md5 = capture_md5
         self.capture_sha256 = capture_sha256
         self.verbose = verbose
+        self.write_chunk_size = write_chunk_size
         self.image_hashes: list[int] = []
         self.image_info: ImageInfo
         self.matches = []  # List of (file_path, file_start_byte, file_end_byte, image_start_byte, image_end_byte) tuples
+        self.file_count = 0  # Track number of processed files
         self._initialize()
 
     def _log(self, message: str):
@@ -420,6 +522,9 @@ class ImageProcessor:
             current_byte = current_block * self.block_size
             self._log(f"Completed reusable extent detection for {relative_path} (processed: {min(current_byte, file_size)}/{file_size} bytes)")
 
+        # Increment file count
+        self.file_count += 1
+
     def finalize(self):
         """
         Finish processing - generate complete shell script to rebuild the image.
@@ -448,13 +553,8 @@ class ImageProcessor:
             if source == 'image':
                 image_ranges.append((start_offset, end_offset))
 
-        # Second pass: create offset mapping
-        offset_mapping = {}  # Maps image_offset -> concatenated_offset
-        concatenated_offset = 0
-        for start_offset, end_offset in image_ranges:
-            for i in range(start_offset, end_offset):
-                offset_mapping[i] = concatenated_offset
-                concatenated_offset += 1
+        # Second pass: create offset mapping using binary search for efficiency
+        offset_mapping = OffsetMapper(image_ranges)
 
         # Step 2: Generate the inner shell script that will copy bytes to reconstruct the image
         self._log("Generating reconstruction script")
@@ -462,10 +562,25 @@ class ImageProcessor:
 
         # Step 3: Generate the self-extracting wrapper script
         self._log("Generating self-extracting shell wrapper")
-        generate_shell_wrapper(script_text, image_ranges, self.image_file, self.output_stream)
+
+        # Define progress callback for verbose mode
+        def progress_callback(bytes_written: int, total_bytes: int) -> None:
+            """Report progress to stderr if verbose mode is enabled."""
+            if self.verbose:
+                percent = (bytes_written / total_bytes * 100) if total_bytes > 0 else 0
+                sys.stderr.write(f"\r[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Writing attachment data: {bytes_written:,} / {total_bytes:,} bytes ({percent:.1f}%)")
+                sys.stderr.flush()
+                if bytes_written == total_bytes:
+                    sys.stderr.write("\n")
+                    sys.stderr.flush()
+
+        generate_shell_wrapper(script_text, image_ranges, self.image_file, self.output_stream,
+                              progress_callback=progress_callback if self.verbose else None,
+                              chunk_size=self.write_chunk_size)
+        self._log(f"Processed {self.file_count} files")
         self._log("Completed finalization")
 
-    def _generate_reconstruction_script(self, sequence, offset_mapping, image_info: ImageInfo) -> str:
+    def _generate_reconstruction_script(self, sequence, offset_mapping: OffsetMapper, image_info: ImageInfo) -> str:
         """Generate the complete reconstruction script with validation and restoration."""
         script_lines = []
 
@@ -485,6 +600,8 @@ class ImageProcessor:
             'use_tempfile=0',
             'verbose=0',
             'exit_code=0',
+            f'block_size={self.write_chunk_size}',
+            'dd_mode=""',
             '',
             'usage() {',
             '    cat >&2 <<EOF',
@@ -500,6 +617,8 @@ class ImageProcessor:
             '  -a          Skip ACL restoration',
             '  -T          Use intermediate temporary file for validation',
             '  -v          Verbose mode (show progress messages)',
+            f'  -b SIZE     Block size in bytes for dd operations (default: {self.write_chunk_size})',
+            '  -x OPTS     Extra options (comma-separated): gnu-dd, plain-dd, no-dd',
             '  -h          Show this help message',
             '',
             'Arguments:',
@@ -508,7 +627,7 @@ class ImageProcessor:
             '    exit 1',
             '}',
             '',
-            'while getopts "iMSpotaTvh" opt; do',
+            'while getopts "iMSpotaTvb:x:h" opt; do',
             '    case "$opt" in',
             '        i) show_info=1 ;;',
             '        M) skip_md5=1 ;;',
@@ -519,6 +638,22 @@ class ImageProcessor:
             '        a) skip_acl=1 ;;',
             '        T) use_tempfile=1 ;;',
             '        v) verbose=1 ;;',
+            '        b) block_size="$OPTARG" ;;',
+            '        x)',
+            '            # Parse comma-separated extra options',
+            '            # Use POSIX-compatible method (no here-string)',
+            '            saved_ifs="$IFS"',
+            '            IFS=,',
+            '            for opt_val in $OPTARG; do',
+            '                case "$opt_val" in',
+            '                    gnu-dd) dd_mode="gnu" ;;',
+            '                    plain-dd) dd_mode="plain" ;;',
+            '                    no-dd) dd_mode="none" ;;',
+            '                    *) echo "Warning: Unknown option: $opt_val" >&2 ;;',
+            '                esac',
+            '            done',
+            '            IFS="$saved_ifs"',
+            '            ;;',
             '        h) usage ;;',
             '        *) usage ;;',
             '    esac',
@@ -559,19 +694,23 @@ class ImageProcessor:
         if image_info.acl:
             script_lines.append('  ACL:         Available')
 
-        # Add source files list
-        script_lines.append('')
-        script_lines.append('Source Files:')
+        # Close heredoc before source files list
+        script_lines.extend([
+            '',
+            'Source Files:',
+            'EOF',
+        ])
+
+        # Add source files list using echo (not heredoc) for proper escaping
         if source_files:
             for file_path in source_files:
-                # Escape the file path for display
-                escaped_path = file_path.replace("'", "'\"'\"'")
-                script_lines.append(f"  '{escaped_path}'")
+                # Escape the file path for display using secure escaping
+                escaped_path = escape_for_shell_display(str(file_path))
+                script_lines.append(f"    echo '  '{escaped_path}")
         else:
-            script_lines.append('  (no external files - image reconstructed from embedded data only)')
+            script_lines.append("    echo '  (no external files - image reconstructed from embedded data only)'")
 
         script_lines.extend([
-            'EOF',
             '    exit 0',
             'fi',
             '',
@@ -582,16 +721,73 @@ class ImageProcessor:
             '    exit 1',
             'fi',
             '',
+            '# Detect dd mode',
+            '# Three modes supported:',
+            '# - gnu: Use GNU dd with iflag=skip_bytes,count_bytes (fastest, large blocks)',
+            '# - plain: Use plain dd with block-wise skip + head/tail for in-block precision',
+            '# - none: Use only tail/head, no dd (most portable, slightly slower)',
+            'if [ -z "$dd_mode" ]; then',
+            '    # Auto-detect: try GNU dd',
+            '    if dd if=/dev/null of=/dev/null bs=1 count=0 iflag=skip_bytes 2>/dev/null; then',
+            '        dd_mode="gnu"',
+            '    else',
+            '        dd_mode="plain"',
+            '    fi',
+            'fi',
+            '',
             '# Helper functions',
             'copy_from_script() {',
-            '    if ! dd if="$script_file" bs=1 skip=$((data_offset + $1)) count=$2 2>/dev/null; then',
-            '        echo "Error: Failed to copy $2 bytes from embedded data at offset $1" >&2',
+            '    local skip_offset=$(echo "$data_offset + $1" | bc)',
+            '    local count=$2',
+            '    ',
+            '    if [ "$dd_mode" = "gnu" ]; then',
+            '        # GNU dd: use iflag for byte-level skip/count with large block size',
+            '        [ "$verbose" -eq 1 ] && echo "dd if=\"$script_file\" bs=\"$block_size\" skip=\"$skip_offset\" count=$count iflag=skip_bytes,count_bytes" >&2',
+            '        dd if="$script_file" bs="$block_size" skip="$skip_offset" count="$count" iflag=skip_bytes,count_bytes 2>/dev/null',
+            '    elif [ "$dd_mode" = "plain" ]; then',
+            '        # Plain dd: block-wise skip, then head/tail for in-block precision',
+            '        local skip_blocks=$(echo "$skip_offset / $block_size" | bc)',
+            '        local skip_bytes=$(echo "$skip_offset % $block_size" | bc)',
+            '        local tail_pos=$(echo "$skip_bytes + 1" | bc)',
+            '        [ "$verbose" -eq 1 ] && echo "dd if=\"$script_file\" bs=\"$block_size\" skip=$skip_blocks 2>/dev/null | tail -c +$tail_pos | head -c $count" >&2',
+            '        dd if="$script_file" bs="$block_size" skip="$skip_blocks" 2>/dev/null | tail -c +"$tail_pos" | head -c "$count"',
+            '    else',
+            '        # No dd mode: pure tail/head (most portable)',
+            '        local tail_offset=$(echo "$skip_offset + 1" | bc)',
+            '        [ "$verbose" -eq 1 ] && echo "tail -c +$tail_offset \"$script_file\" | head -c $count" >&2',
+            '        tail -c +"$tail_offset" "$script_file" | head -c "$count"',
+            '    fi',
+            '    ',
+            '    if [ $? -ne 0 ]; then',
+            '        echo "Error: Failed to copy $count bytes from embedded data at offset $skip_offset" >&2',
             '        exit 1',
             '    fi',
             '}',
             'copy_from_file() {',
-            '    if ! dd if="$1" bs=1 skip=$2 count=$3 2>/dev/null; then',
-            r'        echo "Error: Failed to copy $3 bytes from file '"'"'$1'"'"' at offset $2" >&2',
+            '    local file="$1"',
+            '    local skip=$2',
+            '    local count=$3',
+            '    ',
+            '    if [ "$dd_mode" = "gnu" ]; then',
+            '        # GNU dd: use iflag for byte-level skip/count with large block size',
+            '        [ "$verbose" -eq 1 ] && echo "dd if=\"$file\" bs=\"$block_size\" skip=$skip count=$count iflag=skip_bytes,count_bytes" >&2',
+            '        dd if="$file" bs="$block_size" skip="$skip" count="$count" iflag=skip_bytes,count_bytes 2>/dev/null',
+            '    elif [ "$dd_mode" = "plain" ]; then',
+            '        # Plain dd: block-wise skip, then head/tail for in-block precision',
+            '        local skip_blocks=$(echo "$skip / $block_size" | bc)',
+            '        local skip_bytes=$(echo "$skip % $block_size" | bc)',
+            '        local tail_pos=$(echo "$skip_bytes + 1" | bc)',
+            '        [ "$verbose" -eq 1 ] && echo "dd if=\"$file\" bs=\"$block_size\" skip=$skip_blocks 2>/dev/null | tail -c +$tail_pos | head -c $count" >&2',
+            '        dd if="$file" bs="$block_size" skip="$skip_blocks" 2>/dev/null | tail -c +"$tail_pos" | head -c "$count"',
+            '    else',
+            '        # No dd mode: pure tail/head (most portable)',
+            '        local tail_offset=$(echo "$skip + 1" | bc)',
+            '        [ "$verbose" -eq 1 ] && echo "tail -c +$tail_offset \"$file\" | head -c $count" >&2',
+            '        tail -c +"$tail_offset" "$file" | head -c "$count"',
+            '    fi',
+            '    ',
+            '    if [ $? -ne 0 ]; then',
+            r'        echo "Error: Failed to copy $count bytes from file '"'"'$file'"'"' at offset $skip" >&2',
             '        exit 1',
             '    fi',
             '}',
@@ -622,11 +818,11 @@ class ImageProcessor:
                 continue
 
             if source == 'image':
-                concat_offset = offset_mapping[start_offset]
+                concat_offset = offset_mapping.map_offset(start_offset)
                 script_lines.append(f'copy_from_script {concat_offset} {size}')
             else:
-                escaped_path = source.replace("'", "'\"'\"'")
-                script_lines.append(f"copy_from_file '{escaped_path}' {start_offset} {size}")
+                escaped_path = escape_for_shell_display(str(source))
+                script_lines.append(f"copy_from_file {escaped_path} {start_offset} {size}")
 
         script_lines.append('')
 
@@ -885,7 +1081,7 @@ def generate_reconstruction_sequence(matches, image_size):
     return reconstruction_sequence
 
 
-def generate_shell_wrapper(script_text, attachment_ranges, attachment_file, output_stream):
+def generate_shell_wrapper(script_text, attachment_ranges, attachment_file, output_stream, progress_callback=None, chunk_size=16*1024*1024):
     """
     Generate a self-extracting shell script wrapper.
 
@@ -900,6 +1096,8 @@ def generate_shell_wrapper(script_text, attachment_ranges, attachment_file, outp
         attachment_file: Path to the attachment file to extract data from
         output_stream: Binary stream to write the complete shell script to (must support
                       binary write operations)
+        progress_callback: Optional callable(bytes_written, total_bytes) for progress reporting
+        chunk_size: Size of chunks in bytes for reading/writing attachment data (default: 16 MiB)
 
     The generated script structure:
     1. Header with embedded script and data offset variable
@@ -911,10 +1109,10 @@ def generate_shell_wrapper(script_text, attachment_ranges, attachment_file, outp
         generate_shell_wrapper(script_text, attachment_ranges, Path('img.bin'), output_file)
     """
     # Step 1: Create the complete wrapper script with embedded reconstruction script and placeholder
-    # Placeholder will be a 10-digit number that we can replace later
+    # Placeholder will be a 20-digit number that we can replace later
     import textwrap
 
-    placeholder = b'data_offset=0000000000'
+    placeholder = b'data_offset=00000000000000000000'
 
     # Encode each segment separately and concatenate as bytes in a single expression
     wrapper_script_bytes = (
@@ -941,8 +1139,8 @@ def generate_shell_wrapper(script_text, attachment_ranges, attachment_file, outp
 
     # Replace placeholder with actual offset in bytes
     # We need to keep the same byte length, so pad with spaces on the RIGHT
-    # Format: 'data_offset=123       ' (number followed by spaces to fill 10 chars)
-    data_offset_bytes = str(data_offset).ljust(10).encode('ascii')
+    # Format: 'data_offset=123                 ' (number followed by spaces to fill 20 chars)
+    data_offset_bytes = str(data_offset).ljust(20).encode('ascii')
 
     # Replace in bytes - only replace the FIRST occurrence to avoid accidentally
     # replacing the same pattern if it appears in the embedded script
@@ -963,12 +1161,30 @@ def generate_shell_wrapper(script_text, attachment_ranges, attachment_file, outp
     # Write wrapper script (which contains the embedded reconstruction script)
     output_buffer.write(wrapper_script_bytes)
 
-    # Write concatenated attachment data
+    # Calculate total bytes to write for progress reporting
+    total_bytes = sum(end - start for start, end in attachment_ranges)
+    bytes_written = 0
+
+    # Write concatenated attachment data in chunks to handle large ranges
     with open(attachment_file, 'rb') as attach_f:
         for start_offset, end_offset in attachment_ranges:
             attach_f.seek(start_offset)
-            data = attach_f.read(end_offset - start_offset)
-            output_buffer.write(data)
+            remaining = end_offset - start_offset
+
+            while remaining > 0:
+                # Read and write in chunks
+                to_read = min(chunk_size, remaining)
+                data = attach_f.read(to_read)
+                if not data:
+                    raise IOError(f"Unexpected end of file at offset {attach_f.tell()}")
+
+                output_buffer.write(data)
+                bytes_written += len(data)
+                remaining -= len(data)
+
+                # Report progress if callback provided
+                if progress_callback:
+                    progress_callback(bytes_written, total_bytes)
 
     # Flush to ensure everything is written
     output_buffer.flush()
@@ -1106,6 +1322,14 @@ Examples:
         help='Enable verbose mode with timestamped progress messages to stderr'
     )
 
+    parser.add_argument(
+        '--write-chunk-size',
+        type=int,
+        default=16*1024*1024,
+        metavar='BYTES',
+        help='Chunk size in bytes for writing attachment data (default: 16777216, which is 16 MiB)'
+    )
+
     args = parser.parse_args()
 
     # Validate min-extent-size is a multiple of block-size
@@ -1140,7 +1364,8 @@ Examples:
         capture_acl=not args.no_acl,
         capture_md5=not args.no_md5,
         capture_sha256=not args.no_sha256,
-        verbose=args.verbose
+        verbose=args.verbose,
+        write_chunk_size=args.write_chunk_size
     )
 
     try:
@@ -1148,16 +1373,11 @@ Examples:
         processor.begin()
 
         # Process each file in the input list
-        file_count = 0
         for file_path in read_file_list(args.input, args.null):
             processor.process_file(file_path)
-            file_count += 1
 
         # Finalize the script
         processor.finalize()
-
-        # Print summary to stderr
-        print(f"Processed {file_count} files", file=sys.stderr)
 
     except KeyboardInterrupt:
         print("\nInterrupted by user", file=sys.stderr)
