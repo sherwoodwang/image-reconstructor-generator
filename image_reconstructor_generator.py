@@ -140,7 +140,7 @@ class ImageProcessor:
     """Processes files and generates shell script to reconstruct an image."""
 
     def __init__(self, image_file: Path, output_stream=sys.stdout, block_size: int = 4096, min_extent_size: int = 1048576,
-                 capture_ownership: bool = True, capture_acl: bool = True, capture_md5: bool = True, capture_sha256: bool = True,
+                 step_size: int = 1048576, capture_ownership: bool = True, capture_acl: bool = True, capture_md5: bool = True, capture_sha256: bool = True,
                  verbose: bool = False, write_chunk_size: int = 16*1024*1024):
         """
         Initialize the image processor.
@@ -150,6 +150,7 @@ class ImageProcessor:
             output_stream: Stream to write the shell script to
             block_size: Size of blocks in bytes for hashing (default: 4096)
             min_extent_size: Minimum reusable extent size in bytes (default: 1048576, which is 1 MiB)
+            step_size: Step size for searching when no match is found in bytes (default: 1048576, which is 1 MiB)
             capture_ownership: Whether to capture ownership information for the image file (default: True)
             capture_acl: Whether to capture ACL information for the image file (default: True)
             capture_md5: Whether to calculate MD5 hash for the image file (default: True)
@@ -161,6 +162,8 @@ class ImageProcessor:
         self.block_size = block_size
         self.min_extent_size = min_extent_size
         self.min_extent_blocks = max(1, min_extent_size // block_size)
+        self.step_size = step_size
+        self.step_blocks = max(1, step_size // block_size)
         self.output_stream = output_stream
         self.capture_ownership = capture_ownership
         self.capture_acl = capture_acl
@@ -511,8 +514,8 @@ class ImageProcessor:
                     # Continue from the end of this match
                     current_block = file_end_block
                 else:
-                    # No match found - skip forward by minimum extent size
-                    current_block += self.min_extent_blocks
+                    # No match found - skip forward by step size
+                    current_block += self.step_blocks
 
             # Log completion with summary
             current_byte = current_block * self.block_size
@@ -1430,6 +1433,14 @@ TYPICAL WORKFLOW:
     )
 
     parser.add_argument(
+        '-s', '--step-size',
+        type=int,
+        default=None,
+        metavar='BYTES',
+        help='Step size for searching when no match is found in bytes (default: same as min-extent-size)'
+    )
+
+    parser.add_argument(
         '--no-ownership',
         action='store_true',
         help='Skip capturing ownership information (owner/group) for the image file'
@@ -1473,6 +1484,14 @@ TYPICAL WORKFLOW:
     if args.min_extent_size % args.block_size != 0:
         parser.error(f"Minimum extent size ({args.min_extent_size}) must be a multiple of block size ({args.block_size})")
 
+    # Set step-size default if not provided (default to min-extent-size)
+    if args.step_size is None:
+        args.step_size = args.min_extent_size
+
+    # Validate step-size is a multiple of block-size
+    if args.step_size % args.block_size != 0:
+        parser.error(f"Step size ({args.step_size}) must be a multiple of block size ({args.block_size})")
+
     # Verify the image file exists
     if not args.image.exists():
         parser.error(f"Image file does not exist: {args.image}")
@@ -1497,6 +1516,7 @@ TYPICAL WORKFLOW:
         args.output,
         block_size=args.block_size,
         min_extent_size=args.min_extent_size,
+        step_size=args.step_size,
         capture_ownership=not args.no_ownership,
         capture_acl=not args.no_acl,
         capture_md5=not args.no_md5,

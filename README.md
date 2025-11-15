@@ -25,6 +25,7 @@ The tool operates in two phases:
 3. For each candidate match found via hash comparison, verifies the match at byte-level to eliminate false positives from hash collisions and confirm exact content alignment
 4. Extends each verified match forward (toward the end of the file) to find the largest contiguous regions where the extracted file and image content are identical
 5. Only keeps extents larger than the configured minimum size to reduce script complexity and avoid including trivial matches
+6. When no match is found, the search position advances by the configured step size (default: same as minimum extent size). A smaller step size enables finding more extents but increases processing time
 
 **Phase 2: Script Generation**
 1. Creates a reconstruction sequence that specifies how to rebuild the image byte-for-byte
@@ -37,6 +38,8 @@ The tool operates in two phases:
 - **Block-Aligned Matching Only**: Content boundaries that don't align with block boundaries (default 4KB) cannot be matched as extents. This means small misalignments between extracted and original files will prevent matching, even if the content is identical.
 
 - **Minimum Extent Size Filter**: The search process only considers matches that are at least the configured minimum size (default 1 MiB). Smaller matching regions, even if they exist and align with block boundaries, will not be reused. This keeps generated scripts manageable but means small files may be entirely included from the original image.
+
+- **Step Size Impact on Extent Discovery**: The search process advances through files by the configured step size (default: same as minimum extent size) when no match is found. A coarser (larger) step size searches fewer positions and may miss valid extents that could have been discovered with finer-grained searching. For example, if the step size is 1 MiB, the tool skips ahead by entire megabytes when searching, potentially overlooking matching regions that lie between these skip points. Using a smaller step size enables discovering more extents but increases processing time proportionally. The trade-off is between discovery completeness and performance.
 
 - **No Content-Aware Matching**: The tool cannot recognize logically equivalent content that has been reformatted or reorganized. Compressed archives, encrypted content, or files that have been modified (even in small ways) appear completely unmatched and must be included in full from the original image.
 
@@ -110,6 +113,7 @@ Output Options:
 Analysis Options:
   -b, --block-size BYTES        Block size for hashing (default: 4096)
   -m, --min-extent-size BYTES   Minimum reusable extent size (default: 1048576)
+  -s, --step-size BYTES         Step size for searching when no match found (default: same as min-extent-size)
 
 Metadata Options:
   --no-ownership                Skip capturing file ownership information
@@ -149,6 +153,11 @@ chmod +x reconstruct.sh
 **With larger block size for faster analysis:**
 ```bash
 image-reconstructor-generator -b 8192 original.img -i files.txt > reconstruct.sh
+```
+
+**With custom step size for finer-grained search:**
+```bash
+image-reconstructor-generator -s 262144 original.img -i files.txt > reconstruct.sh
 ```
 
 **Verbose output to monitor progress:**
